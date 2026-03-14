@@ -149,6 +149,42 @@ function InstructionBanner({ step, quality }) {
     );
 }
 
+// ── gesture hint shown after model is placed ──────────────────────────────────
+function GestureHint({ onDismiss }) {
+    return (
+        <div style={styles.gestureHint}>
+            <div style={styles.gestureTitle}>Adjust the window</div>
+            <div style={styles.gestureRows}>
+                <div style={styles.gestureRow}>
+                    <span style={styles.gestureIcon}>☝</span>
+                    <span style={styles.gestureText}>1 finger drag — move</span>
+                </div>
+                <div style={styles.gestureRow}>
+                    <span style={styles.gestureIcon}>✌</span>
+                    <span style={styles.gestureText}>
+                        Pinch — zoom in / out
+                    </span>
+                </div>
+                <div style={styles.gestureRow}>
+                    <span style={styles.gestureIcon}>↕</span>
+                    <span style={styles.gestureText}>
+                        2 finger drag up/down — push forward / back
+                    </span>
+                </div>
+                <div style={styles.gestureRow}>
+                    <span style={styles.gestureIcon}>↻</span>
+                    <span style={styles.gestureText}>
+                        2 finger twist — rotate
+                    </span>
+                </div>
+            </div>
+            <button style={styles.gestureOk} onClick={onDismiss}>
+                Got it
+            </button>
+        </div>
+    );
+}
+
 function ResultCard({
     dimensions,
     onConfirm,
@@ -159,7 +195,6 @@ function ResultCard({
     if (!dimensions?.widthCm || !dimensions?.heightCm) return null;
     return (
         <div style={styles.resultCard}>
-            {/* model status */}
             {modelLoading && (
                 <div style={styles.modelStatus}>
                     <div style={styles.spinner} />
@@ -169,7 +204,6 @@ function ResultCard({
             {modelError && (
                 <div style={styles.modelStatusError}>{modelError}</div>
             )}
-
             <div style={styles.resultTitle}>Opening measured</div>
             <div style={styles.resultDims}>
                 <div style={styles.dimBox}>
@@ -217,6 +251,7 @@ export default function ARMeasure() {
     const canvasRef = useRef(null);
     const overlayRef = useRef(null);
     const [checked, setChecked] = useState(false);
+    const [hintDismissed, setHintDismissed] = useState(false);
 
     const {
         isSupported,
@@ -227,6 +262,7 @@ export default function ARMeasure() {
         reticleQuality,
         modelLoading,
         modelError,
+        modelPlaced,
         checkSupport,
         startAR,
         stopAR,
@@ -237,6 +273,11 @@ export default function ARMeasure() {
         checkSupport().then(() => setChecked(true));
     }, []);
 
+    // re-show gesture hint each time a new model is placed
+    useEffect(() => {
+        if (modelPlaced) setHintDismissed(false);
+    }, [modelPlaced]);
+
     const handleStart = () => startAR(canvasRef.current, overlayRef.current);
     const handleManual = () => router.visit('/measure/manual');
     const handleConfirm = () => {
@@ -246,12 +287,17 @@ export default function ARMeasure() {
             data: { w: dimensions.widthCm, h: dimensions.heightCm },
         });
     };
+    const handleReset = () => {
+        setHintDismissed(false);
+        reset();
+    };
 
     if (!checked) return <div style={styles.loading}>Checking AR support…</div>;
     if (isSupported === false) return <UnsupportedCard onBack={handleManual} />;
 
     const qualityMeta = QUALITY_META[reticleQuality] || QUALITY_META.none;
     const canTap = qualityMeta.canTap;
+    const showHint = modelPlaced && !hintDismissed && !modelLoading;
 
     return (
         <div style={styles.root}>
@@ -269,7 +315,7 @@ export default function ARMeasure() {
                     </div>
                 </div>
 
-                {/* reticle */}
+                {/* reticle — hidden once model is placed */}
                 {isActive && tapCount < 4 && (
                     <div style={styles.reticleGuide}>
                         <div
@@ -310,6 +356,7 @@ export default function ARMeasure() {
                         50%     { transform: translate(-50%,-50%) scale(1.15); opacity: 0.75; }
                     }
                     @keyframes spin { to { transform: rotate(360deg); } }
+                    @keyframes fadeIn { from { opacity: 0; transform: translateX(-50%) translateY(10px); } to { opacity: 1; transform: translateX(-50%) translateY(0); } }
                 `}</style>
 
                 {/* instruction banner */}
@@ -320,12 +367,17 @@ export default function ARMeasure() {
                     />
                 )}
 
+                {/* gesture hint — shown once after model loads */}
+                {showHint && (
+                    <GestureHint onDismiss={() => setHintDismissed(true)} />
+                )}
+
                 {/* result card */}
                 {dimensions?.widthCm && dimensions?.heightCm && (
                     <ResultCard
                         dimensions={dimensions}
                         onConfirm={handleConfirm}
-                        onReset={reset}
+                        onReset={handleReset}
                         modelLoading={modelLoading}
                         modelError={modelError}
                     />
@@ -335,7 +387,7 @@ export default function ARMeasure() {
 
                 {!isActive && !error && (
                     <div style={styles.startWrap}>
-                        <h1 style={styles.startTitle}>Measure It</h1>
+                        <h1 style={styles.startTitle}>Measure</h1>
                         <p style={styles.startText}>
                             Point your camera at the door or window opening and
                             tap each of the 4 corners to measure it.
@@ -506,6 +558,54 @@ const styles = {
         fontSize: 11,
         color: 'rgba(255,180,50,0.7)',
         letterSpacing: 0.5,
+    },
+    gestureHint: {
+        position: 'absolute',
+        bottom: 180,
+        left: '50%',
+        transform: 'translateX(-50%)',
+        background: 'rgba(0,0,0,0.85)',
+        backdropFilter: 'blur(16px)',
+        borderRadius: 18,
+        padding: '18px 22px',
+        minWidth: 280,
+        border: '1px solid rgba(0,255,136,0.3)',
+        pointerEvents: 'auto',
+        animation: 'fadeIn 0.3s ease',
+    },
+    gestureTitle: {
+        color: '#00ff88',
+        fontSize: 12,
+        fontWeight: 700,
+        letterSpacing: 1.5,
+        textTransform: 'uppercase',
+        marginBottom: 12,
+        textAlign: 'center',
+    },
+    gestureRows: {
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 8,
+        marginBottom: 14,
+    },
+    gestureRow: { display: 'flex', alignItems: 'center', gap: 10 },
+    gestureIcon: {
+        fontSize: 18,
+        width: 24,
+        textAlign: 'center',
+        flexShrink: 0,
+    },
+    gestureText: { fontSize: 13, color: 'rgba(255,255,255,0.75)' },
+    gestureOk: {
+        width: '100%',
+        padding: '10px',
+        background: '#00ff88',
+        color: '#000',
+        border: 'none',
+        borderRadius: 10,
+        fontSize: 14,
+        fontWeight: 700,
+        cursor: 'pointer',
     },
     resultCard: {
         position: 'absolute',
