@@ -303,7 +303,15 @@ export default function ARMeasure() {
         <div style={styles.root}>
             <canvas ref={canvasRef} style={styles.canvas} />
 
-            <div ref={overlayRef} style={styles.overlay}>
+            <div
+                ref={overlayRef}
+                style={{
+                    ...styles.overlay,
+                    // when model is placed, allow touches through to the overlay
+                    // so gesture listeners fire. UI buttons have their own pointerEvents: auto
+                    pointerEvents: modelPlaced ? 'auto' : 'none',
+                }}
+            >
                 {/* top bar */}
                 <div style={styles.topBar}>
                     <button style={styles.closeBtn} onClick={stopAR}>

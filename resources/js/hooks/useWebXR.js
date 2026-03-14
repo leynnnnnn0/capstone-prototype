@@ -199,12 +199,14 @@ export function useWebXR() {
     }
 
     // ── attach gesture listeners to the canvas ────────────────────────────────
-    function attachGestures(canvas, THREE) {
+    function attachGestures(overlayEl, THREE) {
         const g = gestureRef.current;
 
         function onTouchStart(e) {
             // only intercept gestures when model is placed
             if (!windowModelRef.current) return;
+            // stop the touch from reaching WebXR's select handler
+            e.stopPropagation();
             g.active = true;
             g.touchCount = e.touches.length;
 
@@ -294,15 +296,19 @@ export function useWebXR() {
             }
         }
 
-        canvas.addEventListener('touchstart', onTouchStart, { passive: true });
-        canvas.addEventListener('touchmove', onTouchMove, { passive: false });
-        canvas.addEventListener('touchend', onTouchEnd, { passive: true });
+        overlayEl.addEventListener('touchstart', onTouchStart, {
+            passive: true,
+        });
+        overlayEl.addEventListener('touchmove', onTouchMove, {
+            passive: false,
+        });
+        overlayEl.addEventListener('touchend', onTouchEnd, { passive: true });
 
         // return cleanup fn
         return () => {
-            canvas.removeEventListener('touchstart', onTouchStart);
-            canvas.removeEventListener('touchmove', onTouchMove);
-            canvas.removeEventListener('touchend', onTouchEnd);
+            overlayEl.removeEventListener('touchstart', onTouchStart);
+            overlayEl.removeEventListener('touchmove', onTouchMove);
+            overlayEl.removeEventListener('touchend', onTouchEnd);
         };
     }
 
@@ -344,6 +350,9 @@ export function useWebXR() {
     }
 
     const handleTap = useCallback((THREE) => {
+        // once model is placed, taps are handled by gesture system, not anchor system
+        if (windowModelRef.current) return;
+
         const q = qualityRef.current;
         if (q === 'none' || q === 'poor' || q === 'okay') return;
         if (!latestHitRef.current) return;
@@ -467,7 +476,7 @@ export function useWebXR() {
                 session.addEventListener('select', () => handleTap(THREE));
 
                 // attach gesture listeners — detach on session end
-                const detachGestures = attachGestures(canvasEl, THREE);
+                const detachGestures = attachGestures(overlayEl, THREE);
 
                 let lastQualityStr = 'none';
 
