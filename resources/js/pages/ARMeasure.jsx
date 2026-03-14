@@ -335,7 +335,7 @@ export default function ARMeasure() {
 
                 {!isActive && !error && (
                     <div style={styles.startWrap}>
-                        <h1 style={styles.startTitle}>Measure</h1>
+                        <h1 style={styles.startTitle}>Measure It</h1>
                         <p style={styles.startText}>
                             Point your camera at the door or window opening and
                             tap each of the 4 corners to measure it.
