@@ -28,22 +28,8 @@ export function useWebXR() {
     const anchorsRef = useRef([]);
     const dotMeshesRef = useRef([]);
     const lineMeshesRef = useRef([]);
-    const tappedCornersRef = useRef([]);
     const windowModelRef = useRef(null);
-    const canvasElRef = useRef(null);
-
-    // ── gesture state ────────────────────────────────────────────────────────
-    const gestureRef = useRef({
-        active: false,
-        touchCount: 0,
-        // single finger
-        lastX: 0,
-        lastY: 0,
-        // two finger
-        lastDist: 0, // pinch distance
-        lastAngle: 0, // rotation angle
-        lastMidY: 0, // for depth push/pull
-    });
+    const originalTransformRef = useRef(null);
 
     const [isSupported, setIsSupported] = useState(null);
     const [isActive, setIsActive] = useState(false);
@@ -83,11 +69,19 @@ export function useWebXR() {
         );
     }
 
-    function calcDimensions([tl, tr, bl, br]) {
-        return {
-            widthCm: ((dist3D(tl, tr) + dist3D(bl, br)) / 2).toFixed(1),
-            heightCm: ((dist3D(tl, bl) + dist3D(tr, br)) / 2).toFixed(1),
+    // ── 3-tap measurement ─────────────────────────────────────────────────────
+    // User taps: [0] top-left, [1] top-right, [2] bottom-left
+    // We compute bottom-right from the parallelogram
+    function calcDimensionsFrom3([tl, tr, bl]) {
+        const widthCm = dist3D(tl, tr).toFixed(1);
+        const heightCm = dist3D(tl, bl).toFixed(1);
+        // bottom-right = top-right + (bottom-left - top-left)
+        const br = {
+            x: tr.x + (bl.x - tl.x),
+            y: tr.y + (bl.y - tl.y),
+            z: tr.z + (bl.z - tl.z),
         };
+        return { widthCm, heightCm, corners: [tl, tr, bl, br] };
     }
 
     function evalQuality(stableFrames, hasHit) {
@@ -99,7 +93,7 @@ export function useWebXR() {
     }
 
     function addDot(THREE, position, index) {
-        const colors = [0x00ff88, 0x00ccff, 0xff6600, 0xff0066];
+        const colors = [0x00ff88, 0x00ccff, 0xff6600];
         const geo = new THREE.SphereGeometry(0.012, 16, 16);
         const mat = new THREE.MeshBasicMaterial({ color: colors[index] });
         const mesh = new THREE.Mesh(geo, mat);
@@ -156,9 +150,10 @@ export function useWebXR() {
         const size = new THREE.Vector3();
         box.getSize(size);
 
-        console.log('[WebXR] model natural size (m):', size);
         console.log(
-            '[WebXR] target size (m):',
+            '[WebXR] model size:',
+            size,
+            '→ target:',
             widthM.toFixed(3),
             heightM.toFixed(3),
         );
@@ -182,162 +177,34 @@ export function useWebXR() {
         );
     }
 
-    // ── touch helpers ─────────────────────────────────────────────────────────
-    function getTouchDist(t1, t2) {
-        return Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
-    }
-
-    function getTouchAngle(t1, t2) {
-        return Math.atan2(t2.clientY - t1.clientY, t2.clientX - t1.clientX);
-    }
-
-    function getTouchMid(t1, t2) {
-        return {
-            x: (t1.clientX + t2.clientX) / 2,
-            y: (t1.clientY + t2.clientY) / 2,
-        };
-    }
-
-    // ── attach gesture listeners to the canvas ────────────────────────────────
-    function attachGestures(overlayEl, THREE) {
-        const g = gestureRef.current;
-
-        function onTouchStart(e) {
-            // only intercept gestures when model is placed
-            if (!windowModelRef.current) return;
-            // stop the touch from reaching WebXR's select handler
-            e.stopPropagation();
-            g.active = true;
-            g.touchCount = e.touches.length;
-
-            if (e.touches.length === 1) {
-                g.lastX = e.touches[0].clientX;
-                g.lastY = e.touches[0].clientY;
-            } else if (e.touches.length === 2) {
-                g.lastDist = getTouchDist(e.touches[0], e.touches[1]);
-                g.lastAngle = getTouchAngle(e.touches[0], e.touches[1]);
-                g.lastMidY = getTouchMid(e.touches[0], e.touches[1]).y;
-            }
-        }
-
-        function onTouchMove(e) {
-            if (!g.active || !windowModelRef.current) return;
-            e.preventDefault();
-
-            const model = windowModelRef.current;
-            const camera = cameraRef.current;
-
-            if (e.touches.length === 1 && g.touchCount === 1) {
-                // ── 1 finger: move model along its own plane ──────────────────
-                const dx = (e.touches[0].clientX - g.lastX) / window.innerWidth;
-                const dy =
-                    (e.touches[0].clientY - g.lastY) / window.innerHeight;
-
-                // get camera right and up in world space
-                const camRight = new THREE.Vector3();
-                const camUp = new THREE.Vector3();
-                camera.matrixWorld.extractBasis(
-                    camRight,
-                    camUp,
-                    new THREE.Vector3(),
-                );
-
-                // move sensitivity: 2 meters per full screen swipe
-                const MOVE_SPEED = 2.0;
-                model.position.addScaledVector(camRight, dx * MOVE_SPEED);
-                model.position.addScaledVector(camUp, -dy * MOVE_SPEED);
-
-                g.lastX = e.touches[0].clientX;
-                g.lastY = e.touches[0].clientY;
-            } else if (e.touches.length === 2) {
-                const newDist = getTouchDist(e.touches[0], e.touches[1]);
-                const newAngle = getTouchAngle(e.touches[0], e.touches[1]);
-                const newMidY = getTouchMid(e.touches[0], e.touches[1]).y;
-
-                // ── pinch: scale model ────────────────────────────────────────
-                if (g.lastDist > 0) {
-                    const scaleFactor = newDist / g.lastDist;
-                    model.scale.multiplyScalar(scaleFactor);
-                    // clamp scale: 0.1× to 5× of original
-                    const minS = 0.05;
-                    const maxS = 5;
-                    model.scale.clampScalar(minS, maxS);
-                }
-
-                // ── two finger rotate: spin model around its up/normal axis ───
-                const angleDelta = newAngle - g.lastAngle;
-                // rotate around the world Y axis for natural spin
-                model.rotateOnWorldAxis(new THREE.Vector3(0, 1, 0), angleDelta);
-
-                // ── two finger vertical drag: push/pull depth ─────────────────
-                const depthDelta = (newMidY - g.lastMidY) / window.innerHeight;
-                // get camera forward vector
-                const camForward = new THREE.Vector3();
-                camera.getWorldDirection(camForward);
-                const DEPTH_SPEED = 2.0;
-                model.position.addScaledVector(
-                    camForward,
-                    depthDelta * DEPTH_SPEED,
-                );
-
-                g.lastDist = newDist;
-                g.lastAngle = newAngle;
-                g.lastMidY = newMidY;
-            }
-        }
-
-        function onTouchEnd(e) {
-            g.touchCount = e.touches.length;
-            if (e.touches.length === 0) {
-                g.active = false;
-                // re-init for next gesture
-                g.lastDist = 0;
-                g.lastAngle = 0;
-            }
-        }
-
-        overlayEl.addEventListener('touchstart', onTouchStart, {
-            passive: true,
-        });
-        overlayEl.addEventListener('touchmove', onTouchMove, {
-            passive: false,
-        });
-        overlayEl.addEventListener('touchend', onTouchEnd, { passive: true });
-
-        // return cleanup fn
-        return () => {
-            overlayEl.removeEventListener('touchstart', onTouchStart);
-            overlayEl.removeEventListener('touchmove', onTouchMove);
-            overlayEl.removeEventListener('touchend', onTouchEnd);
-        };
-    }
-
     async function loadWindowModel(THREE, scene, corners) {
         setModelLoading(true);
         setModelError(null);
-
         try {
             const { GLTFLoader } =
                 await import('three/examples/jsm/loaders/GLTFLoader.js');
             const loader = new GLTFLoader();
-
             const gltf = await new Promise((resolve, reject) => {
                 loader.load('/models/window.glb', resolve, undefined, reject);
             });
-
             const model = gltf.scene;
-
             model.traverse((child) => {
                 if (child.isMesh) {
                     child.castShadow = true;
                     child.receiveShadow = true;
                 }
             });
-
             placeModel(THREE, model, corners);
             scene.add(model);
             windowModelRef.current = model;
-
+            originalTransformRef.current = {
+                position: model.position.clone(),
+                rotation: model.rotation.clone(),
+                scale: model.scale.clone(),
+            };
+            // expose for gesture hook (avoids prop-drilling across hook boundary)
+            window.__arModel = model;
+            window.__arCamera = cameraRef.current;
             setModelLoading(false);
             setModelPlaced(true);
         } catch (err) {
@@ -349,29 +216,41 @@ export function useWebXR() {
         }
     }
 
+    // ── tap handler — now only needs 3 taps ──────────────────────────────────
     const handleTap = useCallback((THREE) => {
-        // once model is placed, taps are handled by gesture system, not anchor system
-        if (windowModelRef.current) return;
+        if (windowModelRef.current) return; // model placed, gestures take over
 
         const q = qualityRef.current;
         if (q === 'none' || q === 'poor' || q === 'okay') return;
         if (!latestHitRef.current) return;
 
         const anchors = anchorsRef.current;
-        if (anchors.length >= 4) return;
+        if (anchors.length >= 3) return;
 
         const pos = latestHitRef.current;
         anchors.push({ x: pos.x, y: pos.y, z: pos.z });
         addDot(THREE, pos, anchors.length - 1);
 
+        // draw outline lines as taps come in
         if (anchors.length === 2) addLine(THREE, anchors[0], anchors[1]);
-        if (anchors.length === 3) addLine(THREE, anchors[0], anchors[2]);
-        if (anchors.length === 4) {
-            addLine(THREE, anchors[1], anchors[3]);
-            addLine(THREE, anchors[2], anchors[3]);
-            setDimensions(calcDimensions(anchors));
-            tappedCornersRef.current = [...anchors];
-            loadWindowModel(THREE, sceneRef.current, anchors);
+        if (anchors.length === 3) {
+            // compute br and draw the full rectangle
+            const [tl, tr, bl] = anchors;
+            const br = {
+                x: tr.x + (bl.x - tl.x),
+                y: tr.y + (bl.y - tl.y),
+                z: tr.z + (bl.z - tl.z),
+            };
+            addLine(THREE, tl, bl);
+            addLine(THREE, tr, br);
+            addLine(THREE, bl, br);
+
+            const result = calcDimensionsFrom3(anchors);
+            setDimensions({
+                widthCm: result.widthCm,
+                heightCm: result.heightCm,
+            });
+            loadWindowModel(THREE, sceneRef.current, result.corners);
         }
 
         setTapCount(anchors.length);
@@ -390,11 +269,9 @@ export function useWebXR() {
                 anchorsRef.current = [];
                 dotMeshesRef.current = [];
                 lineMeshesRef.current = [];
-                tappedCornersRef.current = [];
                 stableFramesRef.current = 0;
                 qualityRef.current = 'none';
                 prevHitRef.current = null;
-                canvasElRef.current = canvasEl;
 
                 const THREE = await import('three');
 
@@ -475,9 +352,6 @@ export function useWebXR() {
 
                 session.addEventListener('select', () => handleTap(THREE));
 
-                // attach gesture listeners — detach on session end
-                const detachGestures = attachGestures(overlayEl, THREE);
-
                 let lastQualityStr = 'none';
 
                 renderer.setAnimationLoop((_, frame) => {
@@ -511,10 +385,16 @@ export function useWebXR() {
                         const color = QUALITY_COLOR[q];
                         reticleMat.color.setHex(color);
                         innerMat.color.setHex(color);
-                        reticle.visible = true;
-                        innerCircle.visible = true;
-                        reticle.matrix.fromArray(pose.transform.matrix);
-                        innerCircle.matrix.fromArray(pose.transform.matrix);
+
+                        // hide reticle once model is placed
+                        const modelDone = !!windowModelRef.current;
+                        reticle.visible = !modelDone;
+                        innerCircle.visible = !modelDone;
+
+                        if (!modelDone) {
+                            reticle.matrix.fromArray(pose.transform.matrix);
+                            innerCircle.matrix.fromArray(pose.transform.matrix);
+                        }
 
                         if (q !== lastQualityStr) {
                             lastQualityStr = q;
@@ -540,7 +420,6 @@ export function useWebXR() {
                     setIsActive(false);
                     setReticleQuality('none');
                     renderer.setAnimationLoop(null);
-                    detachGestures();
                 });
 
                 setIsActive(true);
@@ -571,19 +450,30 @@ export function useWebXR() {
             sceneRef.current.remove(windowModelRef.current);
             windowModelRef.current = null;
         }
+        window.__arModel = null;
+        window.__arCamera = null;
         anchorsRef.current = [];
         dotMeshesRef.current.forEach((m) => sceneRef.current?.remove(m));
         lineMeshesRef.current.forEach((l) => sceneRef.current?.remove(l));
         dotMeshesRef.current = [];
         lineMeshesRef.current = [];
-        tappedCornersRef.current = [];
         stableFramesRef.current = 0;
         prevHitRef.current = null;
+        originalTransformRef.current = null;
         setTapCount(0);
         setDimensions(null);
         setModelLoading(false);
         setModelError(null);
         setModelPlaced(false);
+    }, []);
+
+    const resetModelTransform = useCallback(() => {
+        const model = windowModelRef.current;
+        const orig = originalTransformRef.current;
+        if (!model || !orig) return;
+        model.position.copy(orig.position);
+        model.rotation.copy(orig.rotation);
+        model.scale.copy(orig.scale);
     }, []);
 
     return {
@@ -600,5 +490,6 @@ export function useWebXR() {
         startAR,
         stopAR,
         reset,
+        resetModelTransform,
     };
 }
