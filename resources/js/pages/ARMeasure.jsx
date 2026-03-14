@@ -580,7 +580,7 @@ export default function ARMeasure() {
                             automatically.
                         </p>
                         <button style={s.btnPrimary} onClick={handleStart}>
-                            Start AR measurement
+                            Start AR measurement!
                         </button>
                         <button style={s.btnGhost} onClick={handleManual}>
                             Enter manually instead
