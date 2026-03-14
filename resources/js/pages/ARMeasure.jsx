@@ -13,6 +13,40 @@ const STEPS = [
     { label: 'Bottom-right corner', hint: 'Move to the bottom-right corner' },
 ];
 
+// ── quality metadata for UI display ─────────────────────────────────────────
+const QUALITY_META = {
+    none: {
+        color: 'transparent',
+        label: '',
+        hint: 'Searching for surface…',
+        canTap: false,
+    },
+    poor: {
+        color: '#ff2d2d',
+        label: 'Poor',
+        hint: 'Move slowly — finding surface',
+        canTap: false,
+    },
+    okay: {
+        color: '#ff8c00',
+        label: 'Okay',
+        hint: 'Almost ready — keep still',
+        canTap: false,
+    },
+    good: {
+        color: '#ffe600',
+        label: 'Good',
+        hint: 'Surface locked — tap to place',
+        canTap: true,
+    },
+    perfect: {
+        color: '#00ff88',
+        label: 'Perfect',
+        hint: 'Surface locked — tap to place',
+        canTap: true,
+    },
+};
+
 // ── small components ─────────────────────────────────────────────────────────
 function StepIndicator({ current }) {
     return (
@@ -36,13 +70,90 @@ function StepIndicator({ current }) {
     );
 }
 
-function InstructionBanner({ step }) {
-    const s = STEPS[step];
+// quality badge shown in the top bar beside the step dots
+function QualityBadge({ quality }) {
+    const meta = QUALITY_META[quality] || QUALITY_META.none;
+    if (quality === 'none') return null;
     return (
-        <div style={styles.banner}>
-            <div style={styles.bannerStep}>TAP {step + 1} / 4</div>
-            <div style={styles.bannerLabel}>{s.label}</div>
-            <div style={styles.bannerHint}>{s.hint}</div>
+        <div
+            style={{
+                ...styles.qualityBadge,
+                background: meta.color + '22',
+                border: `1px solid ${meta.color}`,
+                color: meta.color,
+            }}
+        >
+            <div style={{ ...styles.qualityDot, background: meta.color }} />
+            {meta.label}
+        </div>
+    );
+}
+
+function InstructionBanner({ step, quality }) {
+    const stepInfo = STEPS[step];
+    const qualityMeta = QUALITY_META[quality] || QUALITY_META.none;
+    const canTap = qualityMeta.canTap;
+
+    return (
+        <div
+            style={{
+                ...styles.banner,
+                borderColor:
+                    qualityMeta.color === 'transparent'
+                        ? 'rgba(255,255,255,0.12)'
+                        : qualityMeta.color + '55',
+            }}
+        >
+            <div
+                style={{
+                    ...styles.bannerStep,
+                    color: canTap ? '#00ff88' : '#aaa',
+                }}
+            >
+                TAP {step + 1} / 4
+            </div>
+            <div style={styles.bannerLabel}>{stepInfo.label}</div>
+
+            {/* quality status row */}
+            <div style={styles.qualityRow}>
+                {['poor', 'okay', 'good', 'perfect'].map((q) => (
+                    <div
+                        key={q}
+                        style={{
+                            ...styles.qualityBar,
+                            background:
+                                quality === q ||
+                                (q === 'poor'
+                                    ? true
+                                    : q === 'okay'
+                                      ? ['okay', 'good', 'perfect'].includes(
+                                            quality,
+                                        )
+                                      : q === 'good'
+                                        ? ['good', 'perfect'].includes(quality)
+                                        : quality === 'perfect')
+                                    ? QUALITY_META[q].color
+                                    : 'rgba(255,255,255,0.12)',
+                            opacity: quality === 'none' ? 0.3 : 1,
+                        }}
+                    />
+                ))}
+            </div>
+
+            <div
+                style={{
+                    ...styles.bannerHint,
+                    color: canTap
+                        ? 'rgba(255,255,255,0.9)'
+                        : 'rgba(255,200,100,0.85)',
+                }}
+            >
+                {canTap ? stepInfo.hint : qualityMeta.hint}
+            </div>
+
+            {!canTap && quality !== 'none' && (
+                <div style={styles.lockedMsg}>Hold still for a moment</div>
+            )}
         </div>
     );
 }
@@ -106,6 +217,7 @@ export default function ARMeasure() {
         tapCount,
         dimensions,
         error,
+        reticleQuality,
         checkSupport,
         startAR,
         stopAR,
@@ -144,6 +256,9 @@ export default function ARMeasure() {
     }
 
     // ── AR session active ────────────────────────────────────────────────────
+    const qualityMeta = QUALITY_META[reticleQuality] || QUALITY_META.none;
+    const canTap = qualityMeta.canTap;
+
     return (
         <div style={styles.root}>
             {/* Three.js renders into this canvas */}
@@ -156,19 +271,64 @@ export default function ARMeasure() {
                     <button style={styles.closeBtn} onClick={stopAR}>
                         ✕ Exit
                     </button>
-                    <StepIndicator current={tapCount} />
+                    <div style={styles.topBarRight}>
+                        <QualityBadge quality={reticleQuality} />
+                        <StepIndicator current={tapCount} />
+                    </div>
                 </div>
 
-                {/* crosshair reticle guide */}
+                {/* DOM reticle ring — centered, color matches Three.js reticle */}
                 {isActive && tapCount < 4 && (
                     <div style={styles.reticleGuide}>
-                        <div style={styles.reticleCross} />
+                        {/* outer ring */}
+                        <div
+                            style={{
+                                ...styles.reticleRing,
+                                borderColor:
+                                    qualityMeta.color === 'transparent'
+                                        ? 'rgba(255,255,255,0.3)'
+                                        : qualityMeta.color,
+                                boxShadow: canTap
+                                    ? `0 0 12px ${qualityMeta.color}88`
+                                    : 'none',
+                                animation: canTap
+                                    ? 'pulse 1.2s ease-in-out infinite'
+                                    : 'none',
+                            }}
+                        />
+                        {/* inner dot */}
+                        <div
+                            style={{
+                                ...styles.reticleDot,
+                                background:
+                                    qualityMeta.color === 'transparent'
+                                        ? 'rgba(255,255,255,0.4)'
+                                        : qualityMeta.color,
+                            }}
+                        />
+                        {/* tap blocked overlay */}
+                        {!canTap && reticleQuality !== 'none' && (
+                            <div style={styles.reticleLock}>
+                                <div style={styles.reticleLockIcon}>⊘</div>
+                            </div>
+                        )}
                     </div>
                 )}
 
+                {/* pulse keyframe injected once */}
+                <style>{`
+                    @keyframes pulse {
+                        0%,100% { transform: translate(-50%,-50%) scale(1);   opacity: 1; }
+                        50%     { transform: translate(-50%,-50%) scale(1.15); opacity: 0.75; }
+                    }
+                `}</style>
+
                 {/* instruction banner */}
                 {isActive && tapCount < 4 && (
-                    <InstructionBanner step={tapCount} />
+                    <InstructionBanner
+                        step={tapCount}
+                        quality={reticleQuality}
+                    />
                 )}
 
                 {/* result overlay */}
@@ -249,6 +409,26 @@ const styles = {
         fontSize: 14,
         cursor: 'pointer',
     },
+    topBarRight: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 10,
+    },
+    qualityBadge: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 5,
+        padding: '5px 10px',
+        borderRadius: 20,
+        fontSize: 12,
+        fontWeight: 600,
+        transition: 'all 0.3s ease',
+    },
+    qualityDot: {
+        width: 7,
+        height: 7,
+        borderRadius: '50%',
+    },
     stepRow: {
         display: 'flex',
         gap: 8,
@@ -266,44 +446,93 @@ const styles = {
         left: '50%',
         transform: 'translate(-50%, -50%)',
         pointerEvents: 'none',
+        width: 56,
+        height: 56,
     },
-    reticleCross: {
-        width: 40,
-        height: 40,
-        border: '2px solid rgba(0,255,136,0.8)',
+    reticleRing: {
+        position: 'absolute',
+        top: '50%',
+        left: '50%',
+        transform: 'translate(-50%, -50%)',
+        width: 52,
+        height: 52,
         borderRadius: '50%',
-        position: 'relative',
+        border: '2.5px solid',
+        transition: 'border-color 0.25s ease, box-shadow 0.25s ease',
+    },
+    reticleDot: {
+        position: 'absolute',
+        top: '50%',
+        left: '50%',
+        transform: 'translate(-50%, -50%)',
+        width: 7,
+        height: 7,
+        borderRadius: '50%',
+        transition: 'background 0.25s ease',
+    },
+    reticleLock: {
+        position: 'absolute',
+        top: '50%',
+        left: '50%',
+        transform: 'translate(-50%, -50%)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
+    reticleLockIcon: {
+        fontSize: 18,
+        color: 'rgba(255,255,255,0.5)',
+        lineHeight: 1,
     },
     banner: {
         position: 'absolute',
         bottom: 160,
         left: '50%',
         transform: 'translateX(-50%)',
-        background: 'rgba(0,0,0,0.72)',
+        background: 'rgba(0,0,0,0.80)',
         backdropFilter: 'blur(12px)',
         borderRadius: 16,
         padding: '16px 24px',
         textAlign: 'center',
-        minWidth: 260,
-        border: '1px solid rgba(255,255,255,0.12)',
+        minWidth: 270,
+        border: '1px solid',
         pointerEvents: 'none',
+        transition: 'border-color 0.3s ease',
     },
     bannerStep: {
         fontSize: 11,
         letterSpacing: 2,
-        color: '#00ff88',
         marginBottom: 4,
         fontWeight: 600,
+        transition: 'color 0.3s ease',
     },
     bannerLabel: {
         fontSize: 18,
         fontWeight: 600,
         color: '#fff',
-        marginBottom: 4,
+        marginBottom: 8,
+    },
+    qualityRow: {
+        display: 'flex',
+        gap: 4,
+        justifyContent: 'center',
+        marginBottom: 8,
+    },
+    qualityBar: {
+        width: 36,
+        height: 4,
+        borderRadius: 2,
+        transition: 'background 0.3s ease',
     },
     bannerHint: {
         fontSize: 13,
-        color: 'rgba(255,255,255,0.6)',
+        transition: 'color 0.3s ease',
+    },
+    lockedMsg: {
+        marginTop: 6,
+        fontSize: 11,
+        color: 'rgba(255,180,50,0.7)',
+        letterSpacing: 0.5,
     },
     resultCard: {
         position: 'absolute',
