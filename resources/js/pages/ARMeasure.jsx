@@ -151,6 +151,12 @@ function InstructionBanner({ step, quality }) {
 
 // ── gesture hint shown after model is placed ──────────────────────────────────
 function GestureHint({ onDismiss }) {
+    // auto-dismiss after 6 seconds
+    useEffect(() => {
+        const t = setTimeout(onDismiss, 6000);
+        return () => clearTimeout(t);
+    }, []);
+
     return (
         <div style={styles.gestureHint}>
             <div style={styles.gestureTitle}>Adjust the window</div>
@@ -168,7 +174,7 @@ function GestureHint({ onDismiss }) {
                 <div style={styles.gestureRow}>
                     <span style={styles.gestureIcon}>↕</span>
                     <span style={styles.gestureText}>
-                        2 finger drag up/down — push forward / back
+                        2 finger drag up/down — push / pull
                     </span>
                 </div>
                 <div style={styles.gestureRow}>
@@ -182,6 +188,15 @@ function GestureHint({ onDismiss }) {
                 Got it
             </button>
         </div>
+    );
+}
+
+// ── floating reset position button ────────────────────────────────────────────
+function ResetPositionButton({ onReset }) {
+    return (
+        <button style={styles.resetPosBtn} onClick={onReset}>
+            ↺ Reset position
+        </button>
     );
 }
 
@@ -267,6 +282,7 @@ export default function ARMeasure() {
         startAR,
         stopAR,
         reset,
+        resetModelTransform,
     } = useWebXR();
 
     useEffect(() => {
@@ -378,6 +394,11 @@ export default function ARMeasure() {
                 {/* gesture hint — shown once after model loads */}
                 {showHint && (
                     <GestureHint onDismiss={() => setHintDismissed(true)} />
+                )}
+
+                {/* reset position button — shown after hint is dismissed */}
+                {modelPlaced && hintDismissed && !modelLoading && (
+                    <ResetPositionButton onReset={resetModelTransform} />
                 )}
 
                 {/* result card */}
@@ -569,15 +590,15 @@ const styles = {
     },
     gestureHint: {
         position: 'absolute',
-        bottom: 180,
-        left: '50%',
-        transform: 'translateX(-50%)',
-        background: 'rgba(0,0,0,0.85)',
+        bottom: 260,
+        left: 20,
+        right: 20,
+        zIndex: 100,
+        background: 'rgba(0,0,0,0.92)',
         backdropFilter: 'blur(16px)',
         borderRadius: 18,
         padding: '18px 22px',
-        minWidth: 280,
-        border: '1px solid rgba(0,255,136,0.3)',
+        border: '1px solid rgba(0,255,136,0.4)',
         pointerEvents: 'auto',
         animation: 'fadeIn 0.3s ease',
     },
@@ -620,6 +641,7 @@ const styles = {
         bottom: 40,
         left: 20,
         right: 20,
+        zIndex: 50,
         background: 'rgba(10,10,20,0.92)',
         backdropFilter: 'blur(20px)',
         borderRadius: 20,
@@ -764,5 +786,22 @@ const styles = {
         borderTopColor: '#00ff88',
         borderRadius: '50%',
         animation: 'spin 0.8s linear infinite',
+    },
+    resetPosBtn: {
+        position: 'absolute',
+        top: 80,
+        left: '50%',
+        transform: 'translateX(-50%)',
+        background: 'rgba(0,0,0,0.7)',
+        backdropFilter: 'blur(10px)',
+        color: '#fff',
+        border: '1px solid rgba(255,255,255,0.25)',
+        borderRadius: 20,
+        padding: '8px 18px',
+        fontSize: 13,
+        fontWeight: 500,
+        cursor: 'pointer',
+        pointerEvents: 'auto',
+        whiteSpace: 'nowrap',
     },
 };
