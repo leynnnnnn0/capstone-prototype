@@ -69,19 +69,19 @@ export function useWebXR() {
         );
     }
 
-    // ── 3-tap measurement ─────────────────────────────────────────────────────
-    // User taps: [0] top-left, [1] top-right, [2] bottom-left
-    // We compute bottom-right from the parallelogram
-    function calcDimensionsFrom3([tl, tr, bl]) {
-        const widthCm = dist3D(tl, tr).toFixed(1);
-        const heightCm = dist3D(tl, bl).toFixed(1);
-        // bottom-right = top-right + (bottom-left - top-left)
-        const br = {
-            x: tr.x + (bl.x - tl.x),
-            y: tr.y + (bl.y - tl.y),
-            z: tr.z + (bl.z - tl.z),
+    // ── 4-tap measurement ─────────────────────────────────────────────────────
+    // User taps: [0] top-left, [1] top-right, [2] bottom-left, [3] bottom-right
+    // Average top+bottom for width, average left+right for height — reduces noise
+    function calcDimensionsFrom4([tl, tr, bl, br]) {
+        const topW = dist3D(tl, tr);
+        const botW = dist3D(bl, br);
+        const leftH = dist3D(tl, bl);
+        const rightH = dist3D(tr, br);
+        return {
+            widthCm: ((topW + botW) / 2).toFixed(1),
+            heightCm: ((leftH + rightH) / 2).toFixed(1),
+            corners: [tl, tr, bl, br],
         };
-        return { widthCm, heightCm, corners: [tl, tr, bl, br] };
     }
 
     function evalQuality(stableFrames, hasHit) {
@@ -93,7 +93,7 @@ export function useWebXR() {
     }
 
     function addDot(THREE, position, index) {
-        const colors = [0x00ff88, 0x00ccff, 0xff6600];
+        const colors = [0x00ff88, 0x00ccff, 0xff6600, 0xff0066]; // 4 colors for 4 taps
         const geo = new THREE.SphereGeometry(0.012, 16, 16);
         const mat = new THREE.MeshBasicMaterial({ color: colors[index] });
         const mesh = new THREE.Mesh(geo, mat);
@@ -122,6 +122,7 @@ export function useWebXR() {
             (c) => new THREE.Vector3(c.x, c.y, c.z),
         );
 
+        // ── center: average of all 4 tapped corners ───────────────────────
         const center = new THREE.Vector3()
             .add(tl)
             .add(tr)
@@ -129,23 +130,40 @@ export function useWebXR() {
             .add(br)
             .divideScalar(4);
 
-        const topEdge = new THREE.Vector3().subVectors(tr, tl);
-        const bottomEdge = new THREE.Vector3().subVectors(br, bl);
+        // ── measured size in meters ───────────────────────────────────────
+        // Average top+bottom width and left+right height to reduce tap noise
+        const widthM = (tl.distanceTo(tr) + bl.distanceTo(br)) / 2;
+        const heightM = (tl.distanceTo(bl) + tr.distanceTo(br)) / 2;
+
+        // ── derive the wall's facing direction (normal) from tapped points ─
+        // Right vector: horizontal direction of the wall (averaged top + bottom)
+        const rawRight = new THREE.Vector3()
+            .addVectors(
+                new THREE.Vector3().subVectors(tr, tl),
+                new THREE.Vector3().subVectors(br, bl),
+            )
+            .normalize();
+
+        // WORLD UP: always use (0,1,0) — never derive up from the tapped points.
+        // This is the key fix for the slanting issue.
+        // Tapped points have small Z-depth differences between them which cause
+        // a tilted "up" vector. Forcing world Y-up makes the model always
+        // stand perfectly vertical regardless of measurement noise.
+        const worldUp = new THREE.Vector3(0, 1, 0);
+
+        // Wall normal = right × worldUp (perpendicular to wall, pointing toward viewer)
+        // We derive normal from right × up instead of from the raw tap geometry
+        const normal = new THREE.Vector3()
+            .crossVectors(rawRight, worldUp)
+            .normalize();
+
+        // Recompute right to be exactly perpendicular to both normal and worldUp
+        // This makes all 3 axes perfectly orthogonal (no tiny floating-point tilt)
         const right = new THREE.Vector3()
-            .addVectors(topEdge, bottomEdge)
+            .crossVectors(worldUp, normal)
             .normalize();
 
-        const leftEdge = new THREE.Vector3().subVectors(tl, bl);
-        const rightEdge = new THREE.Vector3().subVectors(tr, br);
-        const up = new THREE.Vector3()
-            .addVectors(leftEdge, rightEdge)
-            .normalize();
-
-        const normal = new THREE.Vector3().crossVectors(right, up).normalize();
-
-        const widthM = (topEdge.length() + bottomEdge.length()) / 2;
-        const heightM = (leftEdge.length() + rightEdge.length()) / 2;
-
+        // ── scale model to fill the measured opening ──────────────────────
         const box = new THREE.Box3().setFromObject(model);
         const size = new THREE.Vector3();
         box.getSize(size);
@@ -163,9 +181,16 @@ export function useWebXR() {
         const scaleZ = Math.min(scaleX, scaleY);
         model.scale.set(scaleX, scaleY, scaleZ);
 
-        const rotMatrix = new THREE.Matrix4().makeBasis(right, up, normal);
+        // ── apply rotation using the 3 orthogonal axes ────────────────────
+        // makeBasis(right, up, normal) builds a rotation matrix where:
+        //   model's local +X = right (horizontal along wall)
+        //   model's local +Y = worldUp (always perfectly vertical)
+        //   model's local +Z = normal (facing toward the camera)
+        const rotMatrix = new THREE.Matrix4().makeBasis(right, worldUp, normal);
         model.setRotationFromMatrix(rotMatrix);
 
+        // ── position at opening center ────────────────────────────────────
+        // After scaling + rotating, recompute bounding box center to correct offset
         const scaledBox = new THREE.Box3().setFromObject(model);
         const scaledCenter = new THREE.Vector3();
         scaledBox.getCenter(scaledCenter);
@@ -216,7 +241,7 @@ export function useWebXR() {
         }
     }
 
-    // ── tap handler — now only needs 3 taps ──────────────────────────────────
+    // ── tap handler — 4 taps: TL, TR, BL, BR ────────────────────────────────
     const handleTap = useCallback((THREE) => {
         if (windowModelRef.current) return; // model placed, gestures take over
 
@@ -225,27 +250,20 @@ export function useWebXR() {
         if (!latestHitRef.current) return;
 
         const anchors = anchorsRef.current;
-        if (anchors.length >= 3) return;
+        if (anchors.length >= 4) return;
 
         const pos = latestHitRef.current;
         anchors.push({ x: pos.x, y: pos.y, z: pos.z });
         addDot(THREE, pos, anchors.length - 1);
 
-        // draw outline lines as taps come in
-        if (anchors.length === 2) addLine(THREE, anchors[0], anchors[1]);
-        if (anchors.length === 3) {
-            // compute br and draw the full rectangle
-            const [tl, tr, bl] = anchors;
-            const br = {
-                x: tr.x + (bl.x - tl.x),
-                y: tr.y + (bl.y - tl.y),
-                z: tr.z + (bl.z - tl.z),
-            };
-            addLine(THREE, tl, bl);
-            addLine(THREE, tr, br);
-            addLine(THREE, bl, br);
+        // draw outline as corners accumulate
+        if (anchors.length === 2) addLine(THREE, anchors[0], anchors[1]); // top edge
+        if (anchors.length === 3) addLine(THREE, anchors[0], anchors[2]); // left edge
+        if (anchors.length === 4) {
+            addLine(THREE, anchors[1], anchors[3]); // right edge
+            addLine(THREE, anchors[2], anchors[3]); // bottom edge
 
-            const result = calcDimensionsFrom3(anchors);
+            const result = calcDimensionsFrom4(anchors);
             setDimensions({
                 widthCm: result.widthCm,
                 heightCm: result.heightCm,

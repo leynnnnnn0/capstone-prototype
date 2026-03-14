@@ -8,7 +8,11 @@ const STEPS = [
         hint: 'Tap the top-left corner of the opening',
     },
     { label: 'Top-right corner', hint: 'Tap the top-right corner' },
-    { label: 'Bottom-left corner', hint: 'Tap the bottom-left corner — done!' },
+    { label: 'Bottom-left corner', hint: 'Tap the bottom-left corner' },
+    {
+        label: 'Bottom-right corner',
+        hint: 'Tap the bottom-right corner — done!',
+    },
 ];
 
 const QUALITY_META = {
@@ -101,7 +105,7 @@ function InstructionBanner({ step, quality }) {
             <div
                 style={{ ...s.bannerStep, color: canTap ? '#00ff88' : '#aaa' }}
             >
-                TAP {step + 1} / 3
+                TAP {step + 1} / 4
             </div>
             <div style={s.bannerLabel}>{stepInfo.label}</div>
             <div style={s.qualityRow}>
@@ -395,7 +399,7 @@ export default function ARMeasure() {
 
     const qualityMeta = QUALITY_META[reticleQuality] || QUALITY_META.none;
     const canTap = qualityMeta.canTap;
-    const showReticle = isActive && tapCount < 3 && !modelPlaced;
+    const showReticle = isActive && tapCount < 4 && !modelPlaced;
     const showHint = modelPlaced && !hintDismissed && !modelLoading;
 
     return (
@@ -469,7 +473,7 @@ export default function ARMeasure() {
                 `}</style>
 
                 {/* instruction banner */}
-                {isActive && !modelPlaced && tapCount < 3 && (
+                {isActive && !modelPlaced && tapCount < 4 && (
                     <InstructionBanner
                         step={tapCount}
                         quality={reticleQuality}
@@ -500,8 +504,9 @@ export default function ARMeasure() {
                     <div style={s.startWrap}>
                         <h1 style={s.startTitle}>Measure</h1>
                         <p style={s.startText}>
-                            Tap 3 corners — top-left, top-right, bottom-left.
-                            The window appears automatically.
+                            Tap all 4 corners — top-left, top-right,
+                            bottom-left, bottom-right. The window appears
+                            automatically.
                         </p>
                         <button style={s.btnPrimary} onClick={handleStart}>
                             Start AR measurement
