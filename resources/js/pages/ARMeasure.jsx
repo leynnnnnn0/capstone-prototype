@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from 'react';
 import { router } from '@inertiajs/react';
 import { useWebXR } from '../hooks/useWebXR';
 
-// ── step instructions ────────────────────────────────────────────────────────
 const STEPS = [
     {
         label: 'Top-left corner',
@@ -13,7 +12,6 @@ const STEPS = [
     { label: 'Bottom-right corner', hint: 'Move to the bottom-right corner' },
 ];
 
-// ── quality metadata for UI display ─────────────────────────────────────────
 const QUALITY_META = {
     none: {
         color: 'transparent',
@@ -47,7 +45,6 @@ const QUALITY_META = {
     },
 };
 
-// ── small components ─────────────────────────────────────────────────────────
 function StepIndicator({ current }) {
     return (
         <div style={styles.stepRow}>
@@ -70,7 +67,6 @@ function StepIndicator({ current }) {
     );
 }
 
-// quality badge shown in the top bar beside the step dots
 function QualityBadge({ quality }) {
     const meta = QUALITY_META[quality] || QUALITY_META.none;
     if (quality === 'none') return null;
@@ -93,7 +89,6 @@ function InstructionBanner({ step, quality }) {
     const stepInfo = STEPS[step];
     const qualityMeta = QUALITY_META[quality] || QUALITY_META.none;
     const canTap = qualityMeta.canTap;
-
     return (
         <div
             style={{
@@ -113,8 +108,6 @@ function InstructionBanner({ step, quality }) {
                 TAP {step + 1} / 4
             </div>
             <div style={styles.bannerLabel}>{stepInfo.label}</div>
-
-            {/* quality status row */}
             <div style={styles.qualityRow}>
                 {['poor', 'okay', 'good', 'perfect'].map((q) => (
                     <div
@@ -139,7 +132,6 @@ function InstructionBanner({ step, quality }) {
                     />
                 ))}
             </div>
-
             <div
                 style={{
                     ...styles.bannerHint,
@@ -150,7 +142,6 @@ function InstructionBanner({ step, quality }) {
             >
                 {canTap ? stepInfo.hint : qualityMeta.hint}
             </div>
-
             {!canTap && quality !== 'none' && (
                 <div style={styles.lockedMsg}>Hold still for a moment</div>
             )}
@@ -186,7 +177,6 @@ function ResultCard({ dimensions, onConfirm, onReset }) {
     );
 }
 
-
 function UnsupportedCard({ onBack }) {
     return (
         <div style={styles.unsupportedWrap}>
@@ -206,6 +196,48 @@ function UnsupportedCard({ onBack }) {
     );
 }
 
+// ── window image overlay ──────────────────────────────────────────────────────
+// Stretched to fill exactly the bounding box of the 4 tapped corners.
+function WindowOverlay({ rect }) {
+    if (!rect) return null;
+    return (
+        <div
+            style={{
+                position: 'absolute',
+                left: rect.left,
+                top: rect.top,
+                width: rect.width,
+                height: rect.height,
+                pointerEvents: 'none',
+                overflow: 'hidden',
+                borderRadius: 4,
+            }}
+        >
+            <img
+                src="/models/window.jpg"
+                alt="window preview"
+                style={{
+                    width: '100%',
+                    height: '100%',
+                    objectFit: 'fill', // stretch to fill the exact measured rect
+                    opacity: 0.85,
+                    display: 'block',
+                }}
+            />
+            {/* subtle border so the user can see the edges */}
+            <div
+                style={{
+                    position: 'absolute',
+                    inset: 0,
+                    border: '2px solid rgba(0,255,136,0.6)',
+                    borderRadius: 4,
+                    pointerEvents: 'none',
+                }}
+            />
+        </div>
+    );
+}
+
 // ── main page ────────────────────────────────────────────────────────────────
 export default function ARMeasure() {
     const canvasRef = useRef(null);
@@ -219,21 +251,19 @@ export default function ARMeasure() {
         dimensions,
         error,
         reticleQuality,
+        overlayRect,
         checkSupport,
         startAR,
         stopAR,
         reset,
     } = useWebXR();
 
-    // check support on mount
     useEffect(() => {
         checkSupport().then(() => setChecked(true));
     }, []);
 
-    const handleStart = () => {
-        startAR(canvasRef.current, overlayRef.current);
-    };
-
+    const handleStart = () => startAR(canvasRef.current, overlayRef.current);
+    const handleManual = () => router.visit('/measure/manual');
     const handleConfirm = () => {
         if (!dimensions) return;
         stopAR();
@@ -242,31 +272,20 @@ export default function ARMeasure() {
         });
     };
 
-    const handleManual = () => {
-        router.visit('/measure/manual');
-    };
+    if (!checked) return <div style={styles.loading}>Checking AR support…</div>;
+    if (isSupported === false) return <UnsupportedCard onBack={handleManual} />;
 
-    // ── not yet checked ──────────────────────────────────────────────────────
-    if (!checked) {
-        return <div style={styles.loading}>Checking AR support…</div>;
-    }
-
-    // ── unsupported device ───────────────────────────────────────────────────
-    if (isSupported === false) {
-        return <UnsupportedCard onBack={handleManual} />;
-    }
-
-    // ── AR session active ────────────────────────────────────────────────────
     const qualityMeta = QUALITY_META[reticleQuality] || QUALITY_META.none;
     const canTap = qualityMeta.canTap;
 
     return (
         <div style={styles.root}>
-            {/* Three.js renders into this canvas */}
             <canvas ref={canvasRef} style={styles.canvas} />
 
-            {/* DOM overlay — floats above the camera feed */}
             <div ref={overlayRef} style={styles.overlay}>
+                {/* ── window image — rendered BEFORE the UI so UI sits on top ── */}
+                <WindowOverlay rect={overlayRect} />
+
                 {/* top bar */}
                 <div style={styles.topBar}>
                     <button style={styles.closeBtn} onClick={stopAR}>
@@ -278,10 +297,9 @@ export default function ARMeasure() {
                     </div>
                 </div>
 
-                {/* DOM reticle ring — centered, color matches Three.js reticle */}
+                {/* reticle */}
                 {isActive && tapCount < 4 && (
                     <div style={styles.reticleGuide}>
-                        {/* outer ring */}
                         <div
                             style={{
                                 ...styles.reticleRing,
@@ -297,7 +315,6 @@ export default function ARMeasure() {
                                     : 'none',
                             }}
                         />
-                        {/* inner dot */}
                         <div
                             style={{
                                 ...styles.reticleDot,
@@ -307,7 +324,6 @@ export default function ARMeasure() {
                                         : qualityMeta.color,
                             }}
                         />
-                        {/* tap blocked overlay */}
                         {!canTap && reticleQuality !== 'none' && (
                             <div style={styles.reticleLock}>
                                 <div style={styles.reticleLockIcon}>⊘</div>
@@ -316,7 +332,6 @@ export default function ARMeasure() {
                     </div>
                 )}
 
-                {/* pulse keyframe injected once */}
                 <style>{`
                     @keyframes pulse {
                         0%,100% { transform: translate(-50%,-50%) scale(1);   opacity: 1; }
@@ -332,7 +347,7 @@ export default function ARMeasure() {
                     />
                 )}
 
-                {/* result overlay */}
+                {/* result card */}
                 {dimensions?.widthCm && dimensions?.heightCm && (
                     <ResultCard
                         dimensions={dimensions}
@@ -341,10 +356,8 @@ export default function ARMeasure() {
                     />
                 )}
 
-                {/* error message */}
                 {error && <div style={styles.errorBanner}>{error}</div>}
 
-                {/* start button — shown before session begins */}
                 {!isActive && !error && (
                     <div style={styles.startWrap}>
                         <h1 style={styles.startTitle}>Measure</h1>
@@ -365,7 +378,6 @@ export default function ARMeasure() {
     );
 }
 
-// ── styles ────────────────────────────────────────────────────────────────────
 const styles = {
     root: {
         position: 'relative',
@@ -410,11 +422,7 @@ const styles = {
         fontSize: 14,
         cursor: 'pointer',
     },
-    topBarRight: {
-        display: 'flex',
-        alignItems: 'center',
-        gap: 10,
-    },
+    topBarRight: { display: 'flex', alignItems: 'center', gap: 10 },
     qualityBadge: {
         display: 'flex',
         alignItems: 'center',
@@ -425,16 +433,8 @@ const styles = {
         fontWeight: 600,
         transition: 'all 0.3s ease',
     },
-    qualityDot: {
-        width: 7,
-        height: 7,
-        borderRadius: '50%',
-    },
-    stepRow: {
-        display: 'flex',
-        gap: 8,
-        alignItems: 'center',
-    },
+    qualityDot: { width: 7, height: 7, borderRadius: '50%' },
+    stepRow: { display: 'flex', gap: 8, alignItems: 'center' },
     stepDot: {
         width: 10,
         height: 10,
@@ -525,10 +525,7 @@ const styles = {
         borderRadius: 2,
         transition: 'background 0.3s ease',
     },
-    bannerHint: {
-        fontSize: 13,
-        transition: 'color 0.3s ease',
-    },
+    bannerHint: { fontSize: 13, transition: 'color 0.3s ease' },
     lockedMsg: {
         marginTop: 6,
         fontSize: 11,
@@ -563,30 +560,11 @@ const styles = {
         gap: 12,
         marginBottom: 20,
     },
-    dimBox: {
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-    },
-    dimValue: {
-        fontSize: 38,
-        fontWeight: 700,
-        color: '#fff',
-        lineHeight: 1,
-    },
-    dimUnit: {
-        fontSize: 12,
-        color: 'rgba(255,255,255,0.5)',
-        marginTop: 4,
-    },
-    dimSep: {
-        fontSize: 28,
-        color: 'rgba(255,255,255,0.3)',
-    },
-    resultButtons: {
-        display: 'flex',
-        gap: 10,
-    },
+    dimBox: { display: 'flex', flexDirection: 'column', alignItems: 'center' },
+    dimValue: { fontSize: 38, fontWeight: 700, color: '#fff', lineHeight: 1 },
+    dimUnit: { fontSize: 12, color: 'rgba(255,255,255,0.5)', marginTop: 4 },
+    dimSep: { fontSize: 28, color: 'rgba(255,255,255,0.3)' },
+    resultButtons: { display: 'flex', gap: 10 },
     btnPrimary: {
         flex: 1,
         padding: '14px 20px',
@@ -646,12 +624,7 @@ const styles = {
         flexDirection: 'column',
         gap: 12,
     },
-    startTitle: {
-        fontSize: 24,
-        fontWeight: 700,
-        color: '#fff',
-        margin: 0,
-    },
+    startTitle: { fontSize: 24, fontWeight: 700, color: '#fff', margin: 0 },
     startText: {
         fontSize: 15,
         color: 'rgba(255,255,255,0.6)',
@@ -678,14 +651,8 @@ const styles = {
         margin: '0 auto',
         textAlign: 'center',
     },
-    unsupportedIcon: {
-        fontSize: 48,
-    },
-    unsupportedTitle: {
-        fontSize: 22,
-        fontWeight: 700,
-        margin: 0,
-    },
+    unsupportedIcon: { fontSize: 48 },
+    unsupportedTitle: { fontSize: 22, fontWeight: 700, margin: 0 },
     unsupportedText: {
         fontSize: 15,
         color: '#666',
