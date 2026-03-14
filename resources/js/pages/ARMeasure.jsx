@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from 'react';
 import { router } from '@inertiajs/react';
 import { useWebXR } from '../hooks/useWebXR';
 
-// ── 3 steps now instead of 4 ─────────────────────────────────────────────────
 const STEPS = [
     {
         label: 'Top-left corner',
@@ -148,7 +147,7 @@ function InstructionBanner({ step, quality }) {
 
 function GestureHint({ onDismiss }) {
     useEffect(() => {
-        const t = setTimeout(onDismiss, 6000);
+        const t = setTimeout(onDismiss, 5000);
         return () => clearTimeout(t);
     }, []);
     return (
@@ -157,21 +156,15 @@ function GestureHint({ onDismiss }) {
             <div style={s.gestureRows}>
                 <div style={s.gestureRow}>
                     <span style={s.gi}>☝</span>
-                    <span style={s.gt}>1 finger drag — move</span>
-                </div>
-                <div style={s.gestureRow}>
-                    <span style={s.gi}>✌</span>
-                    <span style={s.gt}>Pinch — zoom in / out</span>
-                </div>
-                <div style={s.gestureRow}>
-                    <span style={s.gi}>↕</span>
                     <span style={s.gt}>
-                        2 finger drag up/down — push / pull
+                        1 finger drag — move left / right / up / down
                     </span>
                 </div>
                 <div style={s.gestureRow}>
-                    <span style={s.gi}>↻</span>
-                    <span style={s.gt}>2 finger twist — rotate</span>
+                    <span style={s.gi}>✌</span>
+                    <span style={s.gt}>
+                        2 finger drag up / down — push forward or back
+                    </span>
                 </div>
             </div>
             <button style={s.gestureOk} onClick={onDismiss}>
@@ -181,20 +174,14 @@ function GestureHint({ onDismiss }) {
     );
 }
 
-function ResetPositionButton({ onReset }) {
-    return (
-        <button style={s.resetPosBtn} onClick={onReset}>
-            ↺ Reset position
-        </button>
-    );
-}
-
 function ResultCard({
     dimensions,
     onConfirm,
     onReset,
+    onResetPos,
     modelLoading,
     modelError,
+    modelPlaced,
 }) {
     if (!dimensions?.widthCm || !dimensions?.heightCm) return null;
     return (
@@ -222,6 +209,11 @@ function ResultCard({
                 <button style={s.btnSecondary} onClick={onReset}>
                     Re-measure
                 </button>
+                {modelPlaced && (
+                    <button style={s.btnSecondary} onClick={onResetPos}>
+                        ↺ Reset
+                    </button>
+                )}
                 <button style={s.btnPrimary} onClick={onConfirm}>
                     Find products
                 </button>
@@ -249,145 +241,11 @@ function UnsupportedCard({ onBack }) {
     );
 }
 
-// ── gesture handler — lives on a dedicated div, fully separate from WebXR ────
-function useGestures(gestureTargetRef, getModel, getCamera, THREE) {
-    useEffect(() => {
-        const el = gestureTargetRef.current;
-        if (!el || !THREE) return;
-
-        let intent = null; // 'move' | 'pinch' | 'rotate' | 'depth'
-        let lastX = 0,
-            lastY = 0;
-        let lastDist = 0,
-            lastAngle = 0,
-            lastMidY = 0;
-        let touchCount = 0;
-
-        function dist2(t1, t2) {
-            return Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
-        }
-        function angle2(t1, t2) {
-            return Math.atan2(t2.clientY - t1.clientY, t2.clientX - t1.clientX);
-        }
-        function midY(t1, t2) {
-            return (t1.clientY + t2.clientY) / 2;
-        }
-
-        function onStart(e) {
-            const model = getModel();
-            if (!model) return;
-            touchCount = e.touches.length;
-            intent = null;
-
-            if (e.touches.length === 1) {
-                lastX = e.touches[0].clientX;
-                lastY = e.touches[0].clientY;
-                intent = 'move';
-            } else if (e.touches.length === 2) {
-                lastDist = dist2(e.touches[0], e.touches[1]);
-                lastAngle = angle2(e.touches[0], e.touches[1]);
-                lastMidY = midY(e.touches[0], e.touches[1]);
-            }
-        }
-
-        function onMove(e) {
-            const model = getModel();
-            const camera = getCamera();
-            if (!model || !camera) return;
-            e.preventDefault();
-
-            if (e.touches.length === 1 && touchCount === 1) {
-                const dx = (e.touches[0].clientX - lastX) / window.innerWidth;
-                const dy = (e.touches[0].clientY - lastY) / window.innerHeight;
-
-                const camRight = new THREE.Vector3();
-                const camUp = new THREE.Vector3();
-                camera.matrixWorld.extractBasis(
-                    camRight,
-                    camUp,
-                    new THREE.Vector3(),
-                );
-
-                model.position.addScaledVector(camRight, dx * 2.0);
-                model.position.addScaledVector(camUp, -dy * 2.0);
-
-                lastX = e.touches[0].clientX;
-                lastY = e.touches[0].clientY;
-            } else if (e.touches.length === 2) {
-                const newDist = dist2(e.touches[0], e.touches[1]);
-                const newAngle = angle2(e.touches[0], e.touches[1]);
-                const newMidY = midY(e.touches[0], e.touches[1]);
-
-                const dd = newDist - lastDist;
-                const da = newAngle - lastAngle;
-                const dy = newMidY - lastMidY;
-
-                // lock intent on first significant movement
-                if (!intent) {
-                    if (Math.abs(dd) > 5) intent = 'pinch';
-                    else if (Math.abs(da) > 0.05) intent = 'rotate';
-                    else if (Math.abs(dy) > 8) intent = 'depth';
-                }
-
-                if (intent === 'pinch') {
-                    // delta-based: +1px = small scale change, never explodes
-                    const next = Math.max(
-                        0.1,
-                        Math.min(5.0, model.scale.x + dd * 0.003),
-                    );
-                    model.scale.setScalar(next);
-                }
-
-                if (intent === 'rotate') {
-                    model.rotateOnWorldAxis(
-                        new THREE.Vector3(0, 1, 0),
-                        da * 0.6,
-                    );
-                }
-
-                if (intent === 'depth') {
-                    const fwd = new THREE.Vector3();
-                    camera.getWorldDirection(fwd);
-                    model.position.addScaledVector(
-                        fwd,
-                        (dy / window.innerHeight) * 1.5,
-                    );
-                }
-
-                lastDist = newDist;
-                lastAngle = newAngle;
-                lastMidY = newMidY;
-            }
-        }
-
-        function onEnd(e) {
-            touchCount = e.touches.length;
-            if (e.touches.length === 0) intent = null;
-            // re-init two-finger state so next gesture starts clean
-            if (e.touches.length < 2) {
-                lastDist = 0;
-                lastAngle = 0;
-            }
-        }
-
-        el.addEventListener('touchstart', onStart, { passive: true });
-        el.addEventListener('touchmove', onMove, { passive: false });
-        el.addEventListener('touchend', onEnd, { passive: true });
-
-        return () => {
-            el.removeEventListener('touchstart', onStart);
-            el.removeEventListener('touchmove', onMove);
-            el.removeEventListener('touchend', onEnd);
-        };
-    }, [THREE]);
-}
-
 // ── main page ────────────────────────────────────────────────────────────────
 export default function ARMeasure() {
     const canvasRef = useRef(null);
     const overlayRef = useRef(null);
-    const gestureRef = useRef(null); // dedicated gesture capture div
-    const THREERef = useRef(null);
+    const gestureRef = useRef(null);
     const [checked, setChecked] = useState(false);
     const [hintDismissed, setHintDismissed] = useState(false);
 
@@ -408,36 +266,6 @@ export default function ARMeasure() {
         resetModelTransform,
     } = useWebXR();
 
-    // load THREE once and store it for the gesture hook
-    useEffect(() => {
-        import('three').then((mod) => {
-            THREERef.current = mod;
-        });
-    }, []);
-
-    // attach gestures to the dedicated gesture div
-    // getModel / getCamera are callbacks so the hook always gets the latest ref values
-    const modelRef = useRef(null);
-    const cameraRef = useRef(null);
-
-    // keep modelRef/cameraRef in sync by passing setters through a custom hook shim
-    // We access the scene objects via the window.___arRefs debug object set in useWebXR
-    useGestures(
-        gestureRef,
-        () => window.__arModel,
-        () => window.__arCamera,
-        THREERef.current,
-    );
-
-    // expose model + camera on window so gesture hook can access them
-    // (avoids prop-drilling through the WebXR hook boundary)
-    useEffect(() => {
-        if (!modelPlaced) {
-            window.__arModel = null;
-            window.__arCamera = null;
-        }
-    }, [modelPlaced]);
-
     useEffect(() => {
         checkSupport().then(() => setChecked(true));
     }, []);
@@ -445,6 +273,105 @@ export default function ARMeasure() {
     useEffect(() => {
         if (modelPlaced) setHintDismissed(false);
     }, [modelPlaced]);
+
+    // ── gesture listeners on the dedicated div ────────────────────────────────
+    // Attached here in the component so we always have closure over latest state.
+    // We read window.__arModel and window.__arCamera which useWebXR sets when
+    // the model is placed — this avoids any timing issues with hook dependencies.
+    useEffect(() => {
+        const el = gestureRef.current;
+        if (!el) return;
+
+        // state for 1-finger move
+        let lastX = 0,
+            lastY = 0;
+        // state for 2-finger depth
+        let lastMidY = 0;
+        let touchCount = 0;
+        // intent lock so move and depth don't fire together
+        let intent = null; // 'move' | 'depth'
+
+        function onStart(e) {
+            if (!window.__arModel) return;
+            touchCount = e.touches.length;
+            intent = null;
+
+            if (e.touches.length === 1) {
+                lastX = e.touches[0].clientX;
+                lastY = e.touches[0].clientY;
+                intent = 'move';
+            } else if (e.touches.length === 2) {
+                lastMidY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+                intent = 'depth';
+            }
+        }
+
+        function onMove(e) {
+            const model = window.__arModel;
+            const camera = window.__arCamera;
+            if (!model || !camera) return;
+            e.preventDefault();
+
+            if (intent === 'move' && e.touches.length === 1) {
+                const dx = (e.touches[0].clientX - lastX) / window.innerWidth;
+                const dy = (e.touches[0].clientY - lastY) / window.innerHeight;
+
+                // extract camera right and up axes from its world matrix
+                const rx = camera.matrixWorld.elements[0];
+                const ry = camera.matrixWorld.elements[1];
+                const rz = camera.matrixWorld.elements[2];
+                const ux = camera.matrixWorld.elements[4];
+                const uy = camera.matrixWorld.elements[5];
+                const uz = camera.matrixWorld.elements[6];
+
+                const SPEED = 2.0;
+                model.position.x += dx * rx * SPEED - dy * ux * SPEED;
+                model.position.y += dx * ry * SPEED - dy * uy * SPEED;
+                model.position.z += dx * rz * SPEED - dy * uz * SPEED;
+
+                lastX = e.touches[0].clientX;
+                lastY = e.touches[0].clientY;
+            } else if (intent === 'depth' && e.touches.length === 2) {
+                const newMidY =
+                    (e.touches[0].clientY + e.touches[1].clientY) / 2;
+                const dy = (newMidY - lastMidY) / window.innerHeight;
+
+                // camera forward = negative Z of its world matrix
+                const fx = -camera.matrixWorld.elements[8];
+                const fy = -camera.matrixWorld.elements[9];
+                const fz = -camera.matrixWorld.elements[10];
+
+                const DEPTH = 1.5;
+                model.position.x += dy * fx * DEPTH;
+                model.position.y += dy * fy * DEPTH;
+                model.position.z += dy * fz * DEPTH;
+
+                lastMidY = newMidY;
+            }
+        }
+
+        function onEnd(e) {
+            touchCount = e.touches.length;
+            if (e.touches.length === 0) {
+                intent = null;
+            } else if (e.touches.length === 1) {
+                // finger lifted from 2-finger — switch to move
+                lastX = e.touches[0].clientX;
+                lastY = e.touches[0].clientY;
+                intent = 'move';
+            }
+        }
+
+        el.addEventListener('touchstart', onStart, { passive: true });
+        el.addEventListener('touchmove', onMove, { passive: false });
+        el.addEventListener('touchend', onEnd, { passive: true });
+
+        return () => {
+            el.removeEventListener('touchstart', onStart);
+            el.removeEventListener('touchmove', onMove);
+            el.removeEventListener('touchend', onEnd);
+        };
+    }, []); // empty deps — reads window.__arModel live, no stale closure issues
 
     const handleStart = () => startAR(canvasRef.current, overlayRef.current);
     const handleManual = () => router.visit('/measure/manual');
@@ -457,9 +384,10 @@ export default function ARMeasure() {
     };
     const handleReset = () => {
         setHintDismissed(false);
-        window.__arModel = null;
-        window.__arCamera = null;
         reset();
+    };
+    const handleResetPos = () => {
+        resetModelTransform();
     };
 
     if (!checked) return <div style={s.loading}>Checking AR support…</div>;
@@ -474,7 +402,7 @@ export default function ARMeasure() {
         <div style={s.root}>
             <canvas ref={canvasRef} style={s.canvas} />
 
-            {/* gesture capture layer — covers full screen, only active after model placed */}
+            {/* gesture layer — full screen transparent div, active only after model placed */}
             <div
                 ref={gestureRef}
                 style={{
@@ -483,7 +411,7 @@ export default function ARMeasure() {
                 }}
             />
 
-            {/* DOM overlay for XR UI */}
+            {/* XR DOM overlay */}
             <div ref={overlayRef} style={s.overlay}>
                 {/* top bar */}
                 <div style={s.topBar}>
@@ -496,7 +424,7 @@ export default function ARMeasure() {
                     </div>
                 </div>
 
-                {/* reticle — hidden once model is placed */}
+                {/* reticle — only shown during measuring */}
                 {showReticle && (
                     <div style={s.reticleGuide}>
                         <div
@@ -533,14 +461,14 @@ export default function ARMeasure() {
 
                 <style>{`
                     @keyframes pulse {
-                        0%,100% { transform:translate(-50%,-50%) scale(1);   opacity:1; }
-                        50%     { transform:translate(-50%,-50%) scale(1.15); opacity:0.75; }
+                        0%,100%{transform:translate(-50%,-50%) scale(1);opacity:1;}
+                        50%{transform:translate(-50%,-50%) scale(1.15);opacity:0.75;}
                     }
-                    @keyframes spin    { to { transform:rotate(360deg); } }
-                    @keyframes fadeIn  { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
+                    @keyframes spin   { to{transform:rotate(360deg);} }
+                    @keyframes fadeIn { from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:translateY(0);} }
                 `}</style>
 
-                {/* instruction banner — only during measuring */}
+                {/* instruction banner */}
                 {isActive && !modelPlaced && tapCount < 3 && (
                     <InstructionBanner
                         step={tapCount}
@@ -553,19 +481,16 @@ export default function ARMeasure() {
                     <GestureHint onDismiss={() => setHintDismissed(true)} />
                 )}
 
-                {/* reset position button */}
-                {modelPlaced && hintDismissed && !modelLoading && (
-                    <ResetPositionButton onReset={resetModelTransform} />
-                )}
-
-                {/* result card */}
+                {/* result card — reset button lives here */}
                 {dimensions?.widthCm && dimensions?.heightCm && (
                     <ResultCard
                         dimensions={dimensions}
                         onConfirm={handleConfirm}
                         onReset={handleReset}
+                        onResetPos={handleResetPos}
                         modelLoading={modelLoading}
                         modelError={modelError}
+                        modelPlaced={modelPlaced}
                     />
                 )}
 
@@ -575,12 +500,11 @@ export default function ARMeasure() {
                     <div style={s.startWrap}>
                         <h1 style={s.startTitle}>Measure</h1>
                         <p style={s.startText}>
-                            Tap 3 corners of the opening — top-left, top-right,
-                            then bottom-left. The window will appear
-                            automatically.
+                            Tap 3 corners — top-left, top-right, bottom-left.
+                            The window appears automatically.
                         </p>
                         <button style={s.btnPrimary} onClick={handleStart}>
-                            Start AR measurement!
+                            Start AR measurement
                         </button>
                         <button style={s.btnGhost} onClick={handleManual}>
                             Enter manually instead
@@ -606,8 +530,8 @@ const s = {
         left: 0,
         width: '100%',
         height: '100%',
+        zIndex: 1,
     },
-    // dedicated gesture layer sits above canvas, below UI
     gestureLayer: {
         position: 'absolute',
         top: 0,
@@ -626,7 +550,7 @@ const s = {
         display: 'flex',
         flexDirection: 'column',
         alignItems: 'center',
-        fontFamily: "'Inter', sans-serif",
+        fontFamily: "'Inter',sans-serif",
         zIndex: 10,
     },
     topBar: {
@@ -799,24 +723,6 @@ const s = {
         fontWeight: 700,
         cursor: 'pointer',
     },
-    resetPosBtn: {
-        position: 'absolute',
-        top: 80,
-        left: '50%',
-        transform: 'translateX(-50%)',
-        background: 'rgba(0,0,0,0.7)',
-        backdropFilter: 'blur(10px)',
-        color: '#fff',
-        border: '1px solid rgba(255,255,255,0.25)',
-        borderRadius: 20,
-        padding: '8px 18px',
-        fontSize: 13,
-        fontWeight: 500,
-        cursor: 'pointer',
-        pointerEvents: 'auto',
-        whiteSpace: 'nowrap',
-        zIndex: 50,
-    },
     resultCard: {
         position: 'absolute',
         bottom: 40,
@@ -850,26 +756,26 @@ const s = {
     dimValue: { fontSize: 38, fontWeight: 700, color: '#fff', lineHeight: 1 },
     dimUnit: { fontSize: 12, color: 'rgba(255,255,255,0.5)', marginTop: 4 },
     dimSep: { fontSize: 28, color: 'rgba(255,255,255,0.3)' },
-    resultButtons: { display: 'flex', gap: 10 },
+    resultButtons: { display: 'flex', gap: 8 },
     btnPrimary: {
         flex: 1,
-        padding: '14px 20px',
+        padding: '14px 12px',
         background: '#00ff88',
         color: '#000',
         border: 'none',
         borderRadius: 12,
-        fontSize: 15,
+        fontSize: 14,
         fontWeight: 600,
         cursor: 'pointer',
     },
     btnSecondary: {
         flex: 0,
-        padding: '14px 18px',
+        padding: '14px 12px',
         background: 'rgba(255,255,255,0.1)',
         color: '#fff',
         border: '1px solid rgba(255,255,255,0.2)',
         borderRadius: 12,
-        fontSize: 14,
+        fontSize: 13,
         cursor: 'pointer',
         whiteSpace: 'nowrap',
     },
