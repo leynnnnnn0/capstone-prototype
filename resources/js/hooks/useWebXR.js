@@ -30,6 +30,7 @@ export function useWebXR() {
     const lineMeshesRef = useRef([]);
     const windowModelRef = useRef(null);
     const originalTransformRef = useRef(null);
+    const selectedModelUrlRef = useRef('/models/window.glb'); // default model
 
     const [isSupported, setIsSupported] = useState(null);
     const [isActive, setIsActive] = useState(false);
@@ -202,7 +203,7 @@ export function useWebXR() {
         );
     }
 
-    async function loadWindowModel(THREE, scene, corners) {
+    async function loadWindowModel(THREE, scene, corners, modelUrl) {
         setModelLoading(true);
         setModelError(null);
         try {
@@ -210,7 +211,7 @@ export function useWebXR() {
                 await import('three/examples/jsm/loaders/GLTFLoader.js');
             const loader = new GLTFLoader();
             const gltf = await new Promise((resolve, reject) => {
-                loader.load('/models/window.glb', resolve, undefined, reject);
+                loader.load(modelUrl, resolve, undefined, reject);
             });
             const model = gltf.scene;
             model.traverse((child) => {
@@ -242,7 +243,7 @@ export function useWebXR() {
     }
 
     // ── tap handler — 4 taps: TL, TR, BL, BR ────────────────────────────────
-    const handleTap = useCallback((THREE) => {
+    const handleTap = useCallback((THREE, modelUrl) => {
         if (windowModelRef.current) return; // model placed, gestures take over
 
         const q = qualityRef.current;
@@ -268,7 +269,7 @@ export function useWebXR() {
                 widthCm: result.widthCm,
                 heightCm: result.heightCm,
             });
-            loadWindowModel(THREE, sceneRef.current, result.corners);
+            loadWindowModel(THREE, sceneRef.current, result.corners, modelUrl);
         }
 
         setTapCount(anchors.length);
@@ -368,7 +369,9 @@ export function useWebXR() {
                 refSpaceRef.current = refSpace;
                 hitTestSourceRef.current = hitTestSource;
 
-                session.addEventListener('select', () => handleTap(THREE));
+                session.addEventListener('select', () =>
+                    handleTap(THREE, selectedModelUrlRef.current),
+                );
 
                 let lastQualityStr = 'none';
 
@@ -494,6 +497,11 @@ export function useWebXR() {
         model.scale.copy(orig.scale);
     }, []);
 
+    // let the UI change which model will be placed on next measurement
+    const setSelectedModel = useCallback((url) => {
+        selectedModelUrlRef.current = url;
+    }, []);
+
     return {
         isSupported,
         isActive,
@@ -509,5 +517,6 @@ export function useWebXR() {
         stopAR,
         reset,
         resetModelTransform,
+        setSelectedModel,
     };
 }

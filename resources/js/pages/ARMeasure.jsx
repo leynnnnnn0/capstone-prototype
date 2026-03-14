@@ -2,6 +2,25 @@ import { useEffect, useRef, useState } from 'react';
 import { router } from '@inertiajs/react';
 import { useWebXR } from '../hooks/useWebXR';
 
+// ── product catalog ───────────────────────────────────────────────────────────
+// Add more entries here as you add .glb files to public/models/
+const MODELS = [
+    {
+        id: 'window1',
+        name: 'Window 1',
+        type: 'window',
+        file: '/models/window.glb',
+    },
+    {
+        id: 'window2',
+        name: 'Window 2',
+        type: 'window',
+        file: '/models/window2.glb',
+    },
+    { id: 'door1', name: 'Door 1', type: 'door', file: '/models/door1.glb' },
+    { id: 'door2', name: 'Door 2', type: 'door', file: '/models/door2.glb' },
+];
+
 const STEPS = [
     {
         label: 'Top-left corner',
@@ -47,6 +66,177 @@ const QUALITY_META = {
         canTap: true,
     },
 };
+
+// ── ModelThumb ─────────────────────────────────────────────────────────────────
+// Renders a live rotating 3D preview of a .glb file into a small canvas.
+// Uses its own mini Three.js scene — completely independent of the AR session.
+function ModelThumb({ file, size = 100 }) {
+    const canvasRef = useRef(null);
+    const rafRef = useRef(null);
+
+    useEffect(() => {
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+
+        let renderer, scene, camera, model;
+        let alive = true;
+
+        async function init() {
+            const THREE = await import('three');
+
+            renderer = new THREE.WebGLRenderer({
+                canvas,
+                alpha: true,
+                antialias: true,
+            });
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            renderer.setSize(size, size);
+
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(45, 1, 0.01, 100);
+            camera.position.set(0, 0, 2.5);
+
+            scene.add(new THREE.AmbientLight(0xffffff, 1.2));
+            const dir = new THREE.DirectionalLight(0xffffff, 0.8);
+            dir.position.set(1, 2, 2);
+            scene.add(dir);
+            const back = new THREE.DirectionalLight(0x88aaff, 0.3);
+            back.position.set(-1, -1, -2);
+            scene.add(back);
+
+            try {
+                const { GLTFLoader } =
+                    await import('three/examples/jsm/loaders/GLTFLoader.js');
+                const loader = new GLTFLoader();
+                const gltf = await new Promise((res, rej) =>
+                    loader.load(file, res, undefined, rej),
+                );
+                model = gltf.scene;
+
+                // fit model into view
+                const box = new THREE.Box3().setFromObject(model);
+                const size3 = new THREE.Vector3();
+                const center = new THREE.Vector3();
+                box.getSize(size3);
+                box.getCenter(center);
+                const maxDim = Math.max(size3.x, size3.y, size3.z);
+                model.scale.setScalar(1.6 / maxDim);
+                model.position.sub(center.multiplyScalar(1.6 / maxDim));
+
+                scene.add(model);
+            } catch (_) {
+                // file not found — show placeholder cube
+                const geo = new THREE.BoxGeometry(1, 1.4, 0.1);
+                const mat = new THREE.MeshStandardMaterial({ color: 0x334455 });
+                model = new THREE.Mesh(geo, mat);
+                scene.add(model);
+            }
+
+            function animate() {
+                if (!alive) return;
+                rafRef.current = requestAnimationFrame(animate);
+                if (model) model.rotation.y += 0.008;
+                renderer.render(scene, camera);
+            }
+            animate();
+        }
+
+        init();
+
+        return () => {
+            alive = false;
+            cancelAnimationFrame(rafRef.current);
+            renderer?.dispose();
+        };
+    }, [file]);
+
+    return (
+        <canvas
+            ref={canvasRef}
+            width={size}
+            height={size}
+            style={{ display: 'block', borderRadius: 8 }}
+        />
+    );
+}
+
+// ── ModelSelector ──────────────────────────────────────────────────────────────
+// Horizontal scrollable row of cards, each showing a 3D preview + name + type tag.
+// Tapping a card selects it and calls onSelect with the model object.
+function ModelSelector({ selected, onSelect }) {
+    return (
+        <div style={s.selectorWrap}>
+            <div style={s.selectorTitle}>Choose a product</div>
+            <div style={s.selectorRow}>
+                {MODELS.map((m) => {
+                    const isSelected = selected?.id === m.id;
+                    return (
+                        <button
+                            key={m.id}
+                            style={{
+                                ...s.modelCard,
+                                borderColor: isSelected
+                                    ? '#00ff88'
+                                    : 'rgba(255,255,255,0.12)',
+                                background: isSelected
+                                    ? 'rgba(0,255,136,0.08)'
+                                    : 'rgba(255,255,255,0.04)',
+                                transform: isSelected
+                                    ? 'scale(1.04)'
+                                    : 'scale(1)',
+                            }}
+                            onClick={() => onSelect(m)}
+                        >
+                            {/* 3D rotating preview */}
+                            <div style={s.thumbWrap}>
+                                <ModelThumb file={m.file} size={90} />
+                            </div>
+
+                            {/* type pill */}
+                            <div
+                                style={{
+                                    ...s.typePill,
+                                    background:
+                                        m.type === 'window'
+                                            ? 'rgba(0,200,255,0.15)'
+                                            : 'rgba(255,160,0,0.15)',
+                                    color:
+                                        m.type === 'window'
+                                            ? '#00ccff'
+                                            : '#ffa000',
+                                    border: `1px solid ${m.type === 'window' ? '#00ccff44' : '#ffa00044'}`,
+                                }}
+                            >
+                                {m.type}
+                            </div>
+
+                            {/* product name */}
+                            <div
+                                style={{
+                                    ...s.modelName,
+                                    color: isSelected ? '#00ff88' : '#fff',
+                                }}
+                            >
+                                {m.name}
+                            </div>
+
+                            {/* selected checkmark */}
+                            {isSelected && <div style={s.selectedMark}>✓</div>}
+                        </button>
+                    );
+                })}
+            </div>
+        </div>
+    );
+}
+
+// ── SelectedBadge ─────────────────────────────────────────────────────────────
+// Small pill shown in the top bar during AR session so user knows which model
+// they're placing without the full selector being visible.
+function SelectedBadge({ model }) {
+    if (!model) return null;
+    return <div style={s.selectedBadge}>{model.name}</div>;
+}
 
 function StepIndicator({ current }) {
     return (
@@ -156,18 +346,16 @@ function GestureHint({ onDismiss }) {
     }, []);
     return (
         <div style={s.gestureHint}>
-            <div style={s.gestureTitle}>Adjust the window</div>
+            <div style={s.gestureTitle}>Adjust the model</div>
             <div style={s.gestureRows}>
                 <div style={s.gestureRow}>
                     <span style={s.gi}>☝</span>
-                    <span style={s.gt}>
-                        1 finger drag — move left / right / up / down
-                    </span>
+                    <span style={s.gt}>1 finger drag — move</span>
                 </div>
                 <div style={s.gestureRow}>
                     <span style={s.gi}>✌</span>
                     <span style={s.gt}>
-                        2 finger drag up / down — push forward or back
+                        2 finger drag up/down — push / pull
                     </span>
                 </div>
             </div>
@@ -180,9 +368,11 @@ function GestureHint({ onDismiss }) {
 
 function ResultCard({
     dimensions,
+    selectedModel,
     onConfirm,
     onReset,
     onResetPos,
+    onSwap,
     modelLoading,
     modelError,
     modelPlaced,
@@ -193,10 +383,11 @@ function ResultCard({
             {modelLoading && (
                 <div style={s.modelStatus}>
                     <div style={s.spinner} />
-                    Loading 3D model…
+                    Loading model…
                 </div>
             )}
             {modelError && <div style={s.modelStatusError}>{modelError}</div>}
+
             <div style={s.resultTitle}>Opening measured</div>
             <div style={s.resultDims}>
                 <div style={s.dimBox}>
@@ -209,6 +400,19 @@ function ResultCard({
                     <span style={s.dimUnit}>cm tall</span>
                 </div>
             </div>
+
+            {/* swap model row — visible after model is placed */}
+            {modelPlaced && (
+                <div style={s.swapRow}>
+                    <div style={s.swapLabel}>
+                        Showing: <strong>{selectedModel?.name}</strong>
+                    </div>
+                    <button style={s.swapBtn} onClick={onSwap}>
+                        Swap model
+                    </button>
+                </div>
+            )}
+
             <div style={s.resultButtons}>
                 <button style={s.btnSecondary} onClick={onReset}>
                     Re-measure
@@ -220,6 +424,79 @@ function ResultCard({
                 )}
                 <button style={s.btnPrimary} onClick={onConfirm}>
                     Find products
+                </button>
+            </div>
+        </div>
+    );
+}
+
+// ── SwapSheet ──────────────────────────────────────────────────────────────────
+// Modal-like bottom sheet that lets user pick a different model mid-session
+// without re-measuring. Tapping a card swaps the model instantly.
+function SwapSheet({ selected, onSelect, onClose }) {
+    return (
+        <div style={s.swapSheetBg} onClick={onClose}>
+            <div style={s.swapSheet} onClick={(e) => e.stopPropagation()}>
+                <div style={s.swapSheetTitle}>Switch model</div>
+                <div style={s.selectorRow}>
+                    {MODELS.map((m) => {
+                        const isSelected = selected?.id === m.id;
+                        return (
+                            <button
+                                key={m.id}
+                                style={{
+                                    ...s.modelCard,
+                                    borderColor: isSelected
+                                        ? '#00ff88'
+                                        : 'rgba(255,255,255,0.12)',
+                                    background: isSelected
+                                        ? 'rgba(0,255,136,0.08)'
+                                        : 'rgba(255,255,255,0.04)',
+                                }}
+                                onClick={() => {
+                                    onSelect(m);
+                                    onClose();
+                                }}
+                            >
+                                <div style={s.thumbWrap}>
+                                    <ModelThumb file={m.file} size={80} />
+                                </div>
+                                <div
+                                    style={{
+                                        ...s.typePill,
+                                        background:
+                                            m.type === 'window'
+                                                ? 'rgba(0,200,255,0.15)'
+                                                : 'rgba(255,160,0,0.15)',
+                                        color:
+                                            m.type === 'window'
+                                                ? '#00ccff'
+                                                : '#ffa000',
+                                        border: `1px solid ${m.type === 'window' ? '#00ccff44' : '#ffa00044'}`,
+                                    }}
+                                >
+                                    {m.type}
+                                </div>
+                                <div
+                                    style={{
+                                        ...s.modelName,
+                                        color: isSelected ? '#00ff88' : '#fff',
+                                    }}
+                                >
+                                    {m.name}
+                                </div>
+                                {isSelected && (
+                                    <div style={s.selectedMark}>✓</div>
+                                )}
+                            </button>
+                        );
+                    })}
+                </div>
+                <button
+                    style={{ ...s.btnSecondary, marginTop: 12, width: '100%' }}
+                    onClick={onClose}
+                >
+                    Cancel
                 </button>
             </div>
         </div>
@@ -245,13 +522,16 @@ function UnsupportedCard({ onBack }) {
     );
 }
 
-// ── main page ────────────────────────────────────────────────────────────────
+// ── main page ─────────────────────────────────────────────────────────────────
 export default function ARMeasure() {
     const canvasRef = useRef(null);
     const overlayRef = useRef(null);
     const gestureRef = useRef(null);
+
     const [checked, setChecked] = useState(false);
     const [hintDismissed, setHintDismissed] = useState(false);
+    const [selectedModel, setSelectedModel] = useState(MODELS[0]); // default: first item
+    const [showSwapSheet, setShowSwapSheet] = useState(false);
 
     const {
         isSupported,
@@ -268,38 +548,36 @@ export default function ARMeasure() {
         stopAR,
         reset,
         resetModelTransform,
+        setSelectedModel: setHookModel,
     } = useWebXR();
 
     useEffect(() => {
         checkSupport().then(() => setChecked(true));
     }, []);
-
     useEffect(() => {
         if (modelPlaced) setHintDismissed(false);
     }, [modelPlaced]);
 
-    // ── gesture listeners on the dedicated div ────────────────────────────────
-    // Attached here in the component so we always have closure over latest state.
-    // We read window.__arModel and window.__arCamera which useWebXR sets when
-    // the model is placed — this avoids any timing issues with hook dependencies.
+    // keep the hook's selectedModelUrlRef in sync with local state
+    useEffect(() => {
+        setHookModel(selectedModel.file);
+    }, [selectedModel]);
+
+    // ── gesture listeners ─────────────────────────────────────────────────────
     useEffect(() => {
         const el = gestureRef.current;
         if (!el) return;
 
-        // state for 1-finger move
         let lastX = 0,
-            lastY = 0;
-        // state for 2-finger depth
-        let lastMidY = 0;
-        let touchCount = 0;
-        // intent lock so move and depth don't fire together
-        let intent = null; // 'move' | 'depth'
+            lastY = 0,
+            lastMidY = 0,
+            touchCount = 0,
+            intent = null;
 
         function onStart(e) {
             if (!window.__arModel) return;
             touchCount = e.touches.length;
             intent = null;
-
             if (e.touches.length === 1) {
                 lastX = e.touches[0].clientX;
                 lastY = e.touches[0].clientY;
@@ -311,55 +589,38 @@ export default function ARMeasure() {
         }
 
         function onMove(e) {
-            const model = window.__arModel;
-            const camera = window.__arCamera;
+            const model = window.__arModel,
+                camera = window.__arCamera;
             if (!model || !camera) return;
             e.preventDefault();
 
             if (intent === 'move' && e.touches.length === 1) {
                 const dx = (e.touches[0].clientX - lastX) / window.innerWidth;
                 const dy = (e.touches[0].clientY - lastY) / window.innerHeight;
-
-                // extract camera right and up axes from its world matrix
-                const rx = camera.matrixWorld.elements[0];
-                const ry = camera.matrixWorld.elements[1];
-                const rz = camera.matrixWorld.elements[2];
-                const ux = camera.matrixWorld.elements[4];
-                const uy = camera.matrixWorld.elements[5];
-                const uz = camera.matrixWorld.elements[6];
-
-                const SPEED = 2.0;
-                model.position.x += dx * rx * SPEED - dy * ux * SPEED;
-                model.position.y += dx * ry * SPEED - dy * uy * SPEED;
-                model.position.z += dx * rz * SPEED - dy * uz * SPEED;
-
+                const m = camera.matrixWorld.elements;
+                const S = 2.0;
+                model.position.x += dx * m[0] * S - dy * m[4] * S;
+                model.position.y += dx * m[1] * S - dy * m[5] * S;
+                model.position.z += dx * m[2] * S - dy * m[6] * S;
                 lastX = e.touches[0].clientX;
                 lastY = e.touches[0].clientY;
             } else if (intent === 'depth' && e.touches.length === 2) {
-                const newMidY =
+                const newMid =
                     (e.touches[0].clientY + e.touches[1].clientY) / 2;
-                const dy = (newMidY - lastMidY) / window.innerHeight;
-
-                // camera forward = negative Z of its world matrix
-                const fx = -camera.matrixWorld.elements[8];
-                const fy = -camera.matrixWorld.elements[9];
-                const fz = -camera.matrixWorld.elements[10];
-
-                const DEPTH = 1.5;
-                model.position.x += dy * fx * DEPTH;
-                model.position.y += dy * fy * DEPTH;
-                model.position.z += dy * fz * DEPTH;
-
-                lastMidY = newMidY;
+                const dy = (newMid - lastMidY) / window.innerHeight;
+                const m = camera.matrixWorld.elements;
+                const S = 1.5;
+                model.position.x += dy * -m[8] * S;
+                model.position.y += dy * -m[9] * S;
+                model.position.z += dy * -m[10] * S;
+                lastMidY = newMid;
             }
         }
 
         function onEnd(e) {
             touchCount = e.touches.length;
-            if (e.touches.length === 0) {
-                intent = null;
-            } else if (e.touches.length === 1) {
-                // finger lifted from 2-finger — switch to move
+            if (e.touches.length === 0) intent = null;
+            else if (e.touches.length === 1) {
                 lastX = e.touches[0].clientX;
                 lastY = e.touches[0].clientY;
                 intent = 'move';
@@ -369,13 +630,23 @@ export default function ARMeasure() {
         el.addEventListener('touchstart', onStart, { passive: true });
         el.addEventListener('touchmove', onMove, { passive: false });
         el.addEventListener('touchend', onEnd, { passive: true });
-
         return () => {
             el.removeEventListener('touchstart', onStart);
             el.removeEventListener('touchmove', onMove);
             el.removeEventListener('touchend', onEnd);
         };
-    }, []); // empty deps — reads window.__arModel live, no stale closure issues
+    }, []);
+
+    // ── swap model mid-session ────────────────────────────────────────────────
+    // When the user picks a new model after the first one is placed:
+    // reset measurement state and immediately reload the new model at same corners
+    const handleSwapSelect = async (newModel) => {
+        setSelectedModel(newModel);
+        setHookModel(newModel.file);
+        // trigger a re-measure with the new model by resetting
+        // (user taps 4 corners again with the new model pre-selected)
+        reset();
+    };
 
     const handleStart = () => startAR(canvasRef.current, overlayRef.current);
     const handleManual = () => router.visit('/measure/manual');
@@ -390,9 +661,7 @@ export default function ARMeasure() {
         setHintDismissed(false);
         reset();
     };
-    const handleResetPos = () => {
-        resetModelTransform();
-    };
+    const handleResetPos = () => resetModelTransform();
 
     if (!checked) return <div style={s.loading}>Checking AR support…</div>;
     if (isSupported === false) return <UnsupportedCard onBack={handleManual} />;
@@ -406,7 +675,7 @@ export default function ARMeasure() {
         <div style={s.root}>
             <canvas ref={canvasRef} style={s.canvas} />
 
-            {/* gesture layer — full screen transparent div, active only after model placed */}
+            {/* gesture layer */}
             <div
                 ref={gestureRef}
                 style={{
@@ -423,12 +692,13 @@ export default function ARMeasure() {
                         ✕ Exit
                     </button>
                     <div style={s.topBarRight}>
+                        {isActive && <SelectedBadge model={selectedModel} />}
                         <QualityBadge quality={reticleQuality} />
                         {!modelPlaced && <StepIndicator current={tapCount} />}
                     </div>
                 </div>
 
-                {/* reticle — only shown during measuring */}
+                {/* reticle */}
                 {showReticle && (
                     <div style={s.reticleGuide}>
                         <div
@@ -464,12 +734,10 @@ export default function ARMeasure() {
                 )}
 
                 <style>{`
-                    @keyframes pulse {
-                        0%,100%{transform:translate(-50%,-50%) scale(1);opacity:1;}
-                        50%{transform:translate(-50%,-50%) scale(1.15);opacity:0.75;}
-                    }
-                    @keyframes spin   { to{transform:rotate(360deg);} }
-                    @keyframes fadeIn { from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:translateY(0);} }
+                    @keyframes pulse{0%,100%{transform:translate(-50%,-50%) scale(1);opacity:1;}50%{transform:translate(-50%,-50%) scale(1.15);opacity:0.75;}}
+                    @keyframes spin{to{transform:rotate(360deg);}}
+                    @keyframes fadeIn{from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:translateY(0);}}
+                    @keyframes slideUp{from{opacity:0;transform:translateY(40px);}to{opacity:1;transform:translateY(0);}}
                 `}</style>
 
                 {/* instruction banner */}
@@ -485,34 +753,52 @@ export default function ARMeasure() {
                     <GestureHint onDismiss={() => setHintDismissed(true)} />
                 )}
 
-                {/* result card — reset button lives here */}
+                {/* result card */}
                 {dimensions?.widthCm && dimensions?.heightCm && (
                     <ResultCard
                         dimensions={dimensions}
+                        selectedModel={selectedModel}
                         onConfirm={handleConfirm}
                         onReset={handleReset}
                         onResetPos={handleResetPos}
+                        onSwap={() => setShowSwapSheet(true)}
                         modelLoading={modelLoading}
                         modelError={modelError}
                         modelPlaced={modelPlaced}
                     />
                 )}
 
+                {/* swap sheet */}
+                {showSwapSheet && (
+                    <SwapSheet
+                        selected={selectedModel}
+                        onSelect={handleSwapSelect}
+                        onClose={() => setShowSwapSheet(false)}
+                    />
+                )}
+
                 {error && <div style={s.errorBanner}>{error}</div>}
 
+                {/* start screen with model selector */}
                 {!isActive && !error && (
                     <div style={s.startWrap}>
-                        <h1 style={s.startTitle}>Measure</h1>
+                        <h1 style={s.startTitle}>Measure opening</h1>
                         <p style={s.startText}>
-                            Tap all 4 corners — top-left, top-right,
-                            bottom-left, bottom-right. The window appears
-                            automatically.
+                            Pick a product, then tap all 4 corners of the
+                            opening.
                         </p>
+
+                        {/* model selector */}
+                        <ModelSelector
+                            selected={selectedModel}
+                            onSelect={setSelectedModel}
+                        />
+
                         <button style={s.btnPrimary} onClick={handleStart}>
-                            Start AR measurement
+                            Start AR — place {selectedModel.name}
                         </button>
                         <button style={s.btnGhost} onClick={handleManual}>
-                            Enter manually instead
+                            Enter measurements manually
                         </button>
                     </div>
                 )}
@@ -575,7 +861,7 @@ const s = {
         fontSize: 14,
         cursor: 'pointer',
     },
-    topBarRight: { display: 'flex', alignItems: 'center', gap: 10 },
+    topBarRight: { display: 'flex', alignItems: 'center', gap: 8 },
     qualityBadge: {
         display: 'flex',
         alignItems: 'center',
@@ -587,6 +873,15 @@ const s = {
         transition: 'all 0.3s ease',
     },
     qualityDot: { width: 7, height: 7, borderRadius: '50%' },
+    selectedBadge: {
+        background: 'rgba(0,0,0,0.6)',
+        color: '#00ff88',
+        border: '1px solid rgba(0,255,136,0.3)',
+        borderRadius: 20,
+        padding: '5px 12px',
+        fontSize: 12,
+        fontWeight: 600,
+    },
     stepRow: { display: 'flex', gap: 8, alignItems: 'center' },
     stepDot: {
         width: 10,
@@ -728,6 +1023,72 @@ const s = {
         fontWeight: 700,
         cursor: 'pointer',
     },
+    // model selector
+    selectorWrap: { width: '100%', marginBottom: 4 },
+    selectorTitle: {
+        fontSize: 11,
+        fontWeight: 600,
+        color: 'rgba(255,255,255,0.5)',
+        letterSpacing: 1.5,
+        textTransform: 'uppercase',
+        marginBottom: 10,
+    },
+    selectorRow: {
+        display: 'flex',
+        gap: 10,
+        overflowX: 'auto',
+        paddingBottom: 4,
+        WebkitOverflowScrolling: 'touch',
+    },
+    modelCard: {
+        flexShrink: 0,
+        width: 110,
+        background: 'rgba(255,255,255,0.04)',
+        border: '1.5px solid',
+        borderRadius: 14,
+        padding: '10px 8px 10px',
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        gap: 6,
+        cursor: 'pointer',
+        transition: 'all 0.2s ease',
+        pointerEvents: 'auto',
+        position: 'relative',
+    },
+    thumbWrap: {
+        width: 90,
+        height: 90,
+        borderRadius: 8,
+        overflow: 'hidden',
+        background: 'rgba(255,255,255,0.03)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
+    typePill: {
+        fontSize: 10,
+        fontWeight: 700,
+        letterSpacing: 1,
+        textTransform: 'uppercase',
+        padding: '2px 8px',
+        borderRadius: 20,
+    },
+    modelName: {
+        fontSize: 12,
+        fontWeight: 600,
+        textAlign: 'center',
+        transition: 'color 0.2s',
+    },
+    selectedMark: {
+        position: 'absolute',
+        top: 6,
+        right: 8,
+        fontSize: 12,
+        color: '#00ff88',
+        fontWeight: 700,
+    },
+    // result card
     resultCard: {
         position: 'absolute',
         bottom: 40,
@@ -737,7 +1098,7 @@ const s = {
         background: 'rgba(10,10,20,0.92)',
         backdropFilter: 'blur(20px)',
         borderRadius: 20,
-        padding: '24px 20px',
+        padding: '20px',
         border: '1px solid rgba(0,255,136,0.3)',
         pointerEvents: 'auto',
     },
@@ -747,7 +1108,7 @@ const s = {
         fontWeight: 600,
         letterSpacing: 1.5,
         textTransform: 'uppercase',
-        marginBottom: 16,
+        marginBottom: 12,
         textAlign: 'center',
     },
     resultDims: {
@@ -755,16 +1116,36 @@ const s = {
         alignItems: 'center',
         justifyContent: 'center',
         gap: 12,
-        marginBottom: 20,
+        marginBottom: 14,
     },
     dimBox: { display: 'flex', flexDirection: 'column', alignItems: 'center' },
-    dimValue: { fontSize: 38, fontWeight: 700, color: '#fff', lineHeight: 1 },
+    dimValue: { fontSize: 36, fontWeight: 700, color: '#fff', lineHeight: 1 },
     dimUnit: { fontSize: 12, color: 'rgba(255,255,255,0.5)', marginTop: 4 },
-    dimSep: { fontSize: 28, color: 'rgba(255,255,255,0.3)' },
+    dimSep: { fontSize: 26, color: 'rgba(255,255,255,0.3)' },
+    swapRow: {
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        marginBottom: 12,
+        padding: '8px 10px',
+        background: 'rgba(255,255,255,0.05)',
+        borderRadius: 10,
+    },
+    swapLabel: { fontSize: 12, color: 'rgba(255,255,255,0.6)' },
+    swapBtn: {
+        fontSize: 12,
+        fontWeight: 600,
+        color: '#00ff88',
+        background: 'transparent',
+        border: '1px solid rgba(0,255,136,0.3)',
+        borderRadius: 8,
+        padding: '4px 10px',
+        cursor: 'pointer',
+    },
     resultButtons: { display: 'flex', gap: 8 },
     btnPrimary: {
         flex: 1,
-        padding: '14px 12px',
+        padding: '13px 10px',
         background: '#00ff88',
         color: '#000',
         border: 'none',
@@ -775,7 +1156,7 @@ const s = {
     },
     btnSecondary: {
         flex: 0,
-        padding: '14px 12px',
+        padding: '13px 10px',
         background: 'rgba(255,255,255,0.1)',
         color: '#fff',
         border: '1px solid rgba(255,255,255,0.2)',
@@ -792,8 +1173,33 @@ const s = {
         borderRadius: 12,
         fontSize: 14,
         cursor: 'pointer',
-        marginTop: 10,
         width: '100%',
+    },
+    // swap sheet
+    swapSheetBg: {
+        position: 'absolute',
+        inset: 0,
+        background: 'rgba(0,0,0,0.6)',
+        zIndex: 200,
+        display: 'flex',
+        flexDirection: 'column',
+        justifyContent: 'flex-end',
+        pointerEvents: 'auto',
+    },
+    swapSheet: {
+        background: 'rgba(10,10,20,0.97)',
+        backdropFilter: 'blur(20px)',
+        borderRadius: '20px 20px 0 0',
+        padding: '20px 20px 40px',
+        border: '1px solid rgba(255,255,255,0.1)',
+        animation: 'slideUp 0.25s ease',
+    },
+    swapSheetTitle: {
+        color: '#fff',
+        fontSize: 16,
+        fontWeight: 700,
+        marginBottom: 16,
+        textAlign: 'center',
     },
     errorBanner: {
         position: 'absolute',
@@ -813,17 +1219,19 @@ const s = {
         bottom: 0,
         left: 0,
         right: 0,
-        background: 'rgba(5,5,15,0.95)',
+        background: 'rgba(5,5,15,0.97)',
         borderRadius: '24px 24px 0 0',
-        padding: '32px 24px 48px',
+        padding: '24px 20px 44px',
         pointerEvents: 'auto',
         display: 'flex',
         flexDirection: 'column',
         gap: 12,
+        maxHeight: '85vh',
+        overflowY: 'auto',
     },
-    startTitle: { fontSize: 24, fontWeight: 700, color: '#fff', margin: 0 },
+    startTitle: { fontSize: 22, fontWeight: 700, color: '#fff', margin: 0 },
     startText: {
-        fontSize: 15,
+        fontSize: 14,
         color: 'rgba(255,255,255,0.6)',
         lineHeight: 1.5,
         margin: 0,
@@ -862,13 +1270,13 @@ const s = {
         gap: 8,
         fontSize: 13,
         color: 'rgba(255,255,255,0.6)',
-        marginBottom: 12,
+        marginBottom: 10,
         justifyContent: 'center',
     },
     modelStatusError: {
         fontSize: 12,
         color: '#ff6b6b',
-        marginBottom: 12,
+        marginBottom: 10,
         textAlign: 'center',
     },
     spinner: {
