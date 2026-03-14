@@ -28,8 +28,8 @@ export function useWebXR() {
     const anchorsRef = useRef([]);
     const dotMeshesRef = useRef([]);
     const lineMeshesRef = useRef([]);
-    // stores the 4 tapped world positions for projection
     const tappedCornersRef = useRef([]);
+    const windowModelRef = useRef(null); // the loaded GLB group
 
     const [isSupported, setIsSupported] = useState(null);
     const [isActive, setIsActive] = useState(false);
@@ -37,8 +37,8 @@ export function useWebXR() {
     const [dimensions, setDimensions] = useState(null);
     const [error, setError] = useState(null);
     const [reticleQuality, setReticleQuality] = useState('none');
-    // screen-space rect: { left, top, width, height } in CSS px
-    const [overlayRect, setOverlayRect] = useState(null);
+    const [modelLoading, setModelLoading] = useState(false);
+    const [modelError, setModelError] = useState(null);
 
     const checkSupport = useCallback(async () => {
         if (!navigator.xr) {
@@ -83,27 +83,6 @@ export function useWebXR() {
         return 'perfect';
     }
 
-    // project one 3-D world point → 2-D screen pixel { x, y }
-    function projectToScreen(THREE, camera, worldPos) {
-        const v = new THREE.Vector3(worldPos.x, worldPos.y, worldPos.z);
-        v.project(camera);
-        return {
-            x: ((v.x + 1) / 2) * window.innerWidth,
-            y: ((-v.y + 1) / 2) * window.innerHeight,
-        };
-    }
-
-    // given the 4 projected screen points, return a bounding rect
-    function cornersToRect(pts) {
-        const xs = pts.map((p) => p.x);
-        const ys = pts.map((p) => p.y);
-        const left = Math.min(...xs);
-        const top = Math.min(...ys);
-        const right = Math.max(...xs);
-        const bottom = Math.max(...ys);
-        return { left, top, width: right - left, height: bottom - top };
-    }
-
     function addDot(THREE, position, index) {
         const colors = [0x00ff88, 0x00ccff, 0xff6600, 0xff0066];
         const geo = new THREE.SphereGeometry(0.012, 16, 16);
@@ -129,6 +108,124 @@ export function useWebXR() {
         lineMeshesRef.current.push(line);
     }
 
+    // ── place the loaded GLB model using the 4 tapped world positions ─────────
+    //
+    // Strategy: we know the 4 corners in world space.
+    // We use them to compute:
+    //   - center point         → where to position the model
+    //   - right + up vectors   → how to orient it (derived from the taps themselves,
+    //                            so it matches the exact plane the user tapped on)
+    //   - width + height scale → so the model fills the opening exactly
+    //
+    function placeModel(THREE, model, corners) {
+        const [tl, tr, bl, br] = corners.map(
+            (c) => new THREE.Vector3(c.x, c.y, c.z),
+        );
+
+        // center of the 4 corners
+        const center = new THREE.Vector3()
+            .add(tl)
+            .add(tr)
+            .add(bl)
+            .add(br)
+            .divideScalar(4);
+
+        // right vector: average of the two horizontal edges
+        const topEdge = new THREE.Vector3().subVectors(tr, tl);
+        const bottomEdge = new THREE.Vector3().subVectors(br, bl);
+        const right = new THREE.Vector3()
+            .addVectors(topEdge, bottomEdge)
+            .normalize();
+
+        // up vector: average of the two vertical edges
+        const leftEdge = new THREE.Vector3().subVectors(tl, bl);
+        const rightEdge = new THREE.Vector3().subVectors(tr, br);
+        const up = new THREE.Vector3()
+            .addVectors(leftEdge, rightEdge)
+            .normalize();
+
+        // normal: right × up (points toward the camera)
+        const normal = new THREE.Vector3().crossVectors(right, up).normalize();
+
+        // measured width and height in meters
+        const widthM = (topEdge.length() + bottomEdge.length()) / 2;
+        const heightM = (leftEdge.length() + rightEdge.length()) / 2;
+
+        // get the model's natural bounding box
+        const box = new THREE.Box3().setFromObject(model);
+        const size = new THREE.Vector3();
+        box.getSize(size);
+
+        // log so you can see what the model's natural size is
+        console.log('[WebXR] model natural size (m):', size);
+        console.log(
+            '[WebXR] target size (m):',
+            widthM.toFixed(3),
+            heightM.toFixed(3),
+        );
+
+        // scale to fill the measured opening exactly
+        const scaleX = size.x > 0 ? widthM / size.x : 1;
+        const scaleY = size.y > 0 ? heightM / size.y : 1;
+        // depth scales with the smaller of the two to stay proportional
+        const scaleZ = Math.min(scaleX, scaleY);
+        model.scale.set(scaleX, scaleY, scaleZ);
+
+        // build rotation matrix from the wall's own axes
+        const rotMatrix = new THREE.Matrix4().makeBasis(right, up, normal);
+        model.setRotationFromMatrix(rotMatrix);
+
+        // position at center — after rotation is set, re-center bounding box
+        const scaledBox = new THREE.Box3().setFromObject(model);
+        const scaledCenter = new THREE.Vector3();
+        scaledBox.getCenter(scaledCenter);
+
+        model.position.set(
+            center.x + (model.position.x - scaledCenter.x),
+            center.y + (model.position.y - scaledCenter.y),
+            center.z + (model.position.z - scaledCenter.z),
+        );
+
+        console.log('[WebXR] model placed at:', center);
+    }
+
+    // ── load window.glb and place it ─────────────────────────────────────────
+    async function loadWindowModel(THREE, scene, corners) {
+        setModelLoading(true);
+        setModelError(null);
+
+        try {
+            const { GLTFLoader } =
+                await import('three/examples/jsm/loaders/GLTFLoader.js');
+            const loader = new GLTFLoader();
+
+            const gltf = await new Promise((resolve, reject) => {
+                loader.load('/models/window.glb', resolve, undefined, reject);
+            });
+
+            const model = gltf.scene;
+
+            model.traverse((child) => {
+                if (child.isMesh) {
+                    child.castShadow = true;
+                    child.receiveShadow = true;
+                }
+            });
+
+            placeModel(THREE, model, corners);
+
+            scene.add(model);
+            windowModelRef.current = model;
+            setModelLoading(false);
+        } catch (err) {
+            console.error('[WebXR] GLTFLoader error:', err);
+            setModelError(
+                'Could not load window.glb — check public/models/window.glb exists.',
+            );
+            setModelLoading(false);
+        }
+    }
+
     const handleTap = useCallback((THREE) => {
         const q = qualityRef.current;
         if (q === 'none' || q === 'poor' || q === 'okay') return;
@@ -147,8 +244,10 @@ export function useWebXR() {
             addLine(THREE, anchors[1], anchors[3]);
             addLine(THREE, anchors[2], anchors[3]);
             setDimensions(calcDimensions(anchors));
-            // save corners for live projection in the render loop
             tappedCornersRef.current = [...anchors];
+
+            // load and place the 3D model now that we have all 4 corners
+            loadWindowModel(THREE, sceneRef.current, anchors);
         }
 
         setTapCount(anchors.length);
@@ -161,7 +260,8 @@ export function useWebXR() {
                 setDimensions(null);
                 setTapCount(0);
                 setReticleQuality('none');
-                setOverlayRect(null);
+                setModelLoading(false);
+                setModelError(null);
                 anchorsRef.current = [];
                 dotMeshesRef.current = [];
                 lineMeshesRef.current = [];
@@ -221,7 +321,10 @@ export function useWebXR() {
                 innerCircle.visible = false;
                 scene.add(innerCircle);
 
-                scene.add(new THREE.AmbientLight(0xffffff, 1));
+                scene.add(new THREE.AmbientLight(0xffffff, 0.8));
+                const dirLight = new THREE.DirectionalLight(0xffffff, 0.6);
+                dirLight.position.set(1, 2, 3);
+                scene.add(dirLight);
 
                 const session = await navigator.xr.requestSession(
                     'immersive-ar',
@@ -301,16 +404,6 @@ export function useWebXR() {
                         }
                     }
 
-                    // ── live-project the 4 tapped corners every frame ─────────────
-                    // This keeps the image overlay glued to the measured rectangle
-                    // even as the user's hand/phone moves slightly after measuring.
-                    if (tappedCornersRef.current.length === 4) {
-                        const pts = tappedCornersRef.current.map((c) =>
-                            projectToScreen(THREE, camera, c),
-                        );
-                        setOverlayRect(cornersToRect(pts));
-                    }
-
                     renderer.render(scene, camera);
                 });
 
@@ -344,6 +437,11 @@ export function useWebXR() {
     }, []);
 
     const reset = useCallback(() => {
+        // remove model from scene
+        if (windowModelRef.current && sceneRef.current) {
+            sceneRef.current.remove(windowModelRef.current);
+            windowModelRef.current = null;
+        }
         anchorsRef.current = [];
         dotMeshesRef.current.forEach((m) => sceneRef.current?.remove(m));
         lineMeshesRef.current.forEach((l) => sceneRef.current?.remove(l));
@@ -354,7 +452,8 @@ export function useWebXR() {
         prevHitRef.current = null;
         setTapCount(0);
         setDimensions(null);
-        setOverlayRect(null);
+        setModelLoading(false);
+        setModelError(null);
     }, []);
 
     return {
@@ -364,7 +463,8 @@ export function useWebXR() {
         dimensions,
         error,
         reticleQuality,
-        overlayRect, // ← new: { left, top, width, height } in CSS px
+        modelLoading,
+        modelError,
         checkSupport,
         startAR,
         stopAR,

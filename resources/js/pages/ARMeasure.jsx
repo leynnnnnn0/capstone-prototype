@@ -149,10 +149,27 @@ function InstructionBanner({ step, quality }) {
     );
 }
 
-function ResultCard({ dimensions, onConfirm, onReset }) {
+function ResultCard({
+    dimensions,
+    onConfirm,
+    onReset,
+    modelLoading,
+    modelError,
+}) {
     if (!dimensions?.widthCm || !dimensions?.heightCm) return null;
     return (
         <div style={styles.resultCard}>
+            {/* model status */}
+            {modelLoading && (
+                <div style={styles.modelStatus}>
+                    <div style={styles.spinner} />
+                    Loading 3D model…
+                </div>
+            )}
+            {modelError && (
+                <div style={styles.modelStatusError}>{modelError}</div>
+            )}
+
             <div style={styles.resultTitle}>Opening measured</div>
             <div style={styles.resultDims}>
                 <div style={styles.dimBox}>
@@ -196,49 +213,6 @@ function UnsupportedCard({ onBack }) {
     );
 }
 
-// ── window image overlay ──────────────────────────────────────────────────────
-// Stretched to fill exactly the bounding box of the 4 tapped corners.
-function WindowOverlay({ rect }) {
-    if (!rect) return null;
-    return (
-        <div
-            style={{
-                position: 'absolute',
-                left: rect.left,
-                top: rect.top,
-                width: rect.width,
-                height: rect.height,
-                pointerEvents: 'none',
-                overflow: 'hidden',
-                borderRadius: 4,
-            }}
-        >
-            <img
-                src="/models/window.jpg"
-                alt="window preview"
-                style={{
-                    width: '100%',
-                    height: '100%',
-                    objectFit: 'fill', // stretch to fill the exact measured rect
-                    opacity: 0.85,
-                    display: 'block',
-                }}
-            />
-            {/* subtle border so the user can see the edges */}
-            <div
-                style={{
-                    position: 'absolute',
-                    inset: 0,
-                    border: '2px solid rgba(0,255,136,0.6)',
-                    borderRadius: 4,
-                    pointerEvents: 'none',
-                }}
-            />
-        </div>
-    );
-}
-
-// ── main page ────────────────────────────────────────────────────────────────
 export default function ARMeasure() {
     const canvasRef = useRef(null);
     const overlayRef = useRef(null);
@@ -251,7 +225,8 @@ export default function ARMeasure() {
         dimensions,
         error,
         reticleQuality,
-        overlayRect,
+        modelLoading,
+        modelError,
         checkSupport,
         startAR,
         stopAR,
@@ -283,9 +258,6 @@ export default function ARMeasure() {
             <canvas ref={canvasRef} style={styles.canvas} />
 
             <div ref={overlayRef} style={styles.overlay}>
-                {/* ── window image — rendered BEFORE the UI so UI sits on top ── */}
-                <WindowOverlay rect={overlayRect} />
-
                 {/* top bar */}
                 <div style={styles.topBar}>
                     <button style={styles.closeBtn} onClick={stopAR}>
@@ -337,6 +309,7 @@ export default function ARMeasure() {
                         0%,100% { transform: translate(-50%,-50%) scale(1);   opacity: 1; }
                         50%     { transform: translate(-50%,-50%) scale(1.15); opacity: 0.75; }
                     }
+                    @keyframes spin { to { transform: rotate(360deg); } }
                 `}</style>
 
                 {/* instruction banner */}
@@ -353,6 +326,8 @@ export default function ARMeasure() {
                         dimensions={dimensions}
                         onConfirm={handleConfirm}
                         onReset={reset}
+                        modelLoading={modelLoading}
+                        modelError={modelError}
                     />
                 )}
 
@@ -658,5 +633,28 @@ const styles = {
         color: '#666',
         lineHeight: 1.6,
         margin: 0,
+    },
+    modelStatus: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        fontSize: 13,
+        color: 'rgba(255,255,255,0.6)',
+        marginBottom: 12,
+        justifyContent: 'center',
+    },
+    modelStatusError: {
+        fontSize: 12,
+        color: '#ff6b6b',
+        marginBottom: 12,
+        textAlign: 'center',
+    },
+    spinner: {
+        width: 14,
+        height: 14,
+        border: '2px solid rgba(255,255,255,0.2)',
+        borderTopColor: '#00ff88',
+        borderRadius: '50%',
+        animation: 'spin 0.8s linear infinite',
     },
 };
