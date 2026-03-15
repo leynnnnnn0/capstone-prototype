@@ -552,6 +552,7 @@ export default function ARMeasure() {
         reset,
         resetModelTransform,
         setSelectedModel: setHookModel,
+        swapModel,
     } = useWebXR();
 
     useEffect(() => {
