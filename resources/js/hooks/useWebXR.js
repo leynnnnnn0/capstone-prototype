@@ -32,6 +32,7 @@ export function useWebXR() {
     const originalTransformRef = useRef(null);
     const lastCornersRef = useRef(null); // saved after every measurement for model swapping
     const THREERef = useRef(null); // stored from startAR so swapModel can reuse it
+    const isSwappingRef = useRef(false); // lock during swap to block stray taps
     const selectedModelUrlRef = useRef('/models/window.glb'); // default model
 
     const [isSupported, setIsSupported] = useState(null);
@@ -206,6 +207,7 @@ export function useWebXR() {
     }
 
     async function loadWindowModel(THREE, scene, corners, modelUrl) {
+        if (!scene || !modelUrl) return;
         setModelLoading(true);
         setModelError(null);
         try {
@@ -223,6 +225,10 @@ export function useWebXR() {
                 }
             });
             placeModel(THREE, model, corners);
+
+            // guard: if the session ended while we were loading, don't add
+            if (sceneRef.current !== scene) return;
+
             scene.add(model);
             windowModelRef.current = model;
             originalTransformRef.current = {
@@ -249,6 +255,7 @@ export function useWebXR() {
     // ── tap handler — 4 taps: TL, TR, BL, BR ────────────────────────────────
     const handleTap = useCallback((THREE, modelUrl) => {
         if (windowModelRef.current) return; // model placed, gestures take over
+        if (isSwappingRef.current) return; // swap in progress, ignore taps
 
         const q = qualityRef.current;
         if (q === 'none' || q === 'poor' || q === 'okay') return;
@@ -479,6 +486,7 @@ export function useWebXR() {
         window.__arModel = null;
         window.__arCamera = null;
         lastCornersRef.current = null;
+        isSwappingRef.current = false;
         anchorsRef.current = [];
         dotMeshesRef.current.forEach((m) => sceneRef.current?.remove(m));
         lineMeshesRef.current.forEach((l) => sceneRef.current?.remove(l));
@@ -522,6 +530,8 @@ export function useWebXR() {
             return;
         }
 
+        isSwappingRef.current = true;
+
         // remove old model from scene and free its GPU memory
         if (windowModelRef.current) {
             scene.remove(windowModelRef.current);
@@ -540,7 +550,11 @@ export function useWebXR() {
         }
 
         // load and place the new model at the same corners
-        await loadWindowModel(THREE, scene, corners, newModelUrl);
+        try {
+            await loadWindowModel(THREE, scene, corners, newModelUrl);
+        } finally {
+            isSwappingRef.current = false;
+        }
     }, []);
 
     return {
