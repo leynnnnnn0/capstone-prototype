@@ -95,6 +95,29 @@
     --sidebar-accent-foreground: oklch(0.205 0 0);
     --sidebar-border: oklch(0.922 0 0);
     --sidebar-ring: oklch(0.87 0 0);
+
+   --brand-blue: #0a214d;
+  --accent-blue: #1e40af;
+  --bg-slate: #f8fafc;
+}
+
+body {
+  background-color: var(--bg-slate);
+  color: #1e293b;
+  font-family: 'Inter', sans-serif;
+}
+
+.glass-header {
+  background: rgba(255, 255, 255, 0.9);
+  backdrop-filter: blur(8px);
+}
+
+.btn-primary {
+  @apply bg-[#0a214d] text-white px-6 py-2 rounded-sm text-sm font-semibold hover:bg-blue-900 transition-all;
+}
+
+.section-label {
+  @apply text-red-600 font-bold text-[10px] uppercase tracking-widest mb-2 block;
 }
 /* 
 .dark {
@@ -131,6 +154,24 @@
     --sidebar-border: oklch(0.269 0 0);
     --sidebar-ring: oklch(0.439 0 0);
 } */
+
+body {
+  background: #020617; 
+  color: #f8fafc;
+}
+
+.glass-card {
+  background: var(--glass-bg);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--glass-border);
+  border-radius: 1rem;
+}
+
+.bento-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 1.5rem;
+}
 
 @layer base {
     * {
