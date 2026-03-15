@@ -437,7 +437,10 @@ function SwapSheet({ selected, onSelect, onClose }) {
     return (
         <div style={s.swapSheetBg} onClick={onClose}>
             <div style={s.swapSheet} onClick={(e) => e.stopPropagation()}>
-                <div style={s.swapSheetTitle}>Switch model</div>
+                <div style={s.swapSheetTitle}>Try another model</div>
+                <div style={s.swapSheetSub}>
+                    Your measurement stays — no need to re-tap.
+                </div>
                 <div style={s.selectorRow}>
                     {MODELS.map((m) => {
                         const isSelected = selected?.id === m.id;
@@ -637,15 +640,14 @@ export default function ARMeasure() {
         };
     }, []);
 
-    // ── swap model mid-session ────────────────────────────────────────────────
-    // When the user picks a new model after the first one is placed:
-    // reset measurement state and immediately reload the new model at same corners
+    // ── swap model — keeps measurement, only changes the 3D model ──────────────
+    // Uses swapModel() from useWebXR which removes the old model and loads
+    // the new one at the SAME saved corners. No re-tapping required.
     const handleSwapSelect = async (newModel) => {
         setSelectedModel(newModel);
         setHookModel(newModel.file);
-        // trigger a re-measure with the new model by resetting
-        // (user taps 4 corners again with the new model pre-selected)
-        reset();
+        setShowSwapSheet(false);
+        await swapModel(newModel.file);
     };
 
     const handleStart = () => startAR(canvasRef.current, overlayRef.current);
@@ -1198,8 +1200,14 @@ const s = {
         color: '#fff',
         fontSize: 16,
         fontWeight: 700,
-        marginBottom: 16,
+        marginBottom: 4,
         textAlign: 'center',
+    },
+    swapSheetSub: {
+        color: 'rgba(255,255,255,0.4)',
+        fontSize: 12,
+        textAlign: 'center',
+        marginBottom: 16,
     },
     errorBanner: {
         position: 'absolute',

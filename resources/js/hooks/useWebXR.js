@@ -30,6 +30,7 @@ export function useWebXR() {
     const lineMeshesRef = useRef([]);
     const windowModelRef = useRef(null);
     const originalTransformRef = useRef(null);
+    const lastCornersRef = useRef(null); // saved after every measurement for model swapping
     const selectedModelUrlRef = useRef('/models/window.glb'); // default model
 
     const [isSupported, setIsSupported] = useState(null);
@@ -233,6 +234,8 @@ export function useWebXR() {
             window.__arCamera = cameraRef.current;
             setModelLoading(false);
             setModelPlaced(true);
+            // save corners so swapModel can re-place without re-measuring
+            lastCornersRef.current = corners;
         } catch (err) {
             console.error('[WebXR] GLTFLoader error:', err);
             setModelError(
@@ -502,6 +505,26 @@ export function useWebXR() {
         selectedModelUrlRef.current = url;
     }, []);
 
+    // ── swapModel ─────────────────────────────────────────────────────────────
+    // Removes the current model and loads a new one at the SAME measured corners.
+    // The user keeps their measurement — no re-tapping needed.
+    const swapModel = useCallback(async (newModelUrl) => {
+        const scene = sceneRef.current;
+        const corners = lastCornersRef.current;
+        if (!scene || !corners) return; // no measurement yet
+
+        // remove old model
+        if (windowModelRef.current) {
+            scene.remove(windowModelRef.current);
+            windowModelRef.current = null;
+            window.__arModel = null;
+        }
+
+        // load the new model at the same corners
+        const THREE = await import('three');
+        await loadWindowModel(THREE, scene, corners, newModelUrl);
+    }, []);
+
     return {
         isSupported,
         isActive,
@@ -518,5 +541,6 @@ export function useWebXR() {
         reset,
         resetModelTransform,
         setSelectedModel,
+        swapModel,
     };
 }
