@@ -701,35 +701,43 @@ export default function ARMeasure() {
         <div style={s.root}>
             <canvas ref={canvasRef} style={s.canvas} />
 
-            {/* debug overlay */}
-            {debugLog.length > 0 && (
+            {/* debug overlay — always visible */}
+            <div
+                style={{
+                    position: 'fixed',
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                    zIndex: 99999,
+                    background: 'rgba(0,0,0,0.9)',
+                    padding: 8,
+                    pointerEvents: 'none',
+                }}
+            >
                 <div
                     style={{
-                        position: 'absolute',
-                        top: 80,
-                        left: 10,
-                        right: 10,
-                        zIndex: 999,
-                        background: 'rgba(0,0,0,0.85)',
-                        borderRadius: 8,
-                        padding: 10,
-                        pointerEvents: 'none',
+                        color: '#0f0',
+                        fontSize: 11,
+                        fontFamily: 'monospace',
                     }}
                 >
-                    {debugLog.map((l, i) => (
-                        <div
-                            key={i}
-                            style={{
-                                color: '#0f0',
-                                fontSize: 11,
-                                fontFamily: 'monospace',
-                            }}
-                        >
-                            {l}
-                        </div>
-                    ))}
+                    DBG | placed:{modelPlaced ? 'Y' : 'N'} loading:
+                    {modelLoading ? 'Y' : 'N'} swapSheet:
+                    {showSwapSheet ? 'Y' : 'N'}
                 </div>
-            )}
+                {debugLog.map((l, i) => (
+                    <div
+                        key={i}
+                        style={{
+                            color: '#ff0',
+                            fontSize: 10,
+                            fontFamily: 'monospace',
+                        }}
+                    >
+                        {l}
+                    </div>
+                ))}
+            </div>
 
             {/* gesture layer */}
             <div
