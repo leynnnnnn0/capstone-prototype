@@ -24,7 +24,7 @@ const STABLE_FRAMES_OKAY = 5;
 const STABLE_FRAMES_GOOD = 15;
 const STABLE_FRAMES_PERFECT = 30;
 const DRIFT_THRESHOLD = 0.005;
-const MIN_TAPS = 3; // need at least 3 points to define a plane
+const DEFAULT_MIN_TAPS = 3;
 
 export function useWebXRFree() {
     const sessionRef = useRef(null);
@@ -47,6 +47,7 @@ export function useWebXRFree() {
     const windowModelRef = useRef(null);
     const originalTransformRef = useRef(null);
     const selectedModelUrlRef = useRef('/models/window.glb');
+    const requiredTapsRef = useRef(4); // set from selected model's tap count
 
     const [isSupported, setIsSupported] = useState(null);
     const [isActive, setIsActive] = useState(false);
@@ -286,7 +287,12 @@ export function useWebXRFree() {
 
         const newCount = anchors.length;
         setTapCount(newCount);
-        setCanConfirm(newCount >= MIN_TAPS);
+        // auto-confirm when required taps reached
+        if (newCount === requiredTapsRef.current) {
+            confirmMeasurement(THREE);
+        } else {
+            setCanConfirm(newCount >= DEFAULT_MIN_TAPS);
+        }
     }, []);
 
     // ── undo last tap ─────────────────────────────────────────────────────────
@@ -304,7 +310,12 @@ export function useWebXRFree() {
 
         const newCount = anchors.length;
         setTapCount(newCount);
-        setCanConfirm(newCount >= MIN_TAPS);
+        // auto-confirm when required taps reached
+        if (newCount === requiredTapsRef.current) {
+            confirmMeasurement(THREE);
+        } else {
+            setCanConfirm(newCount >= DEFAULT_MIN_TAPS);
+        }
     }, []);
 
     // ── confirm: compute dimensions and place model ───────────────────────────
@@ -543,6 +554,10 @@ export function useWebXRFree() {
         selectedModelUrlRef.current = url;
     }, []);
 
+    const setRequiredTaps = useCallback((n) => {
+        requiredTapsRef.current = n;
+    }, []);
+
     // expose undo/confirm so UI buttons can call them
     const handleUndo = useCallback(() => undoTap(window.__arTHREE), [undoTap]);
     const handleConfirm = useCallback(
@@ -569,5 +584,6 @@ export function useWebXRFree() {
         setSelectedModel,
         handleUndo,
         handleConfirm,
+        setRequiredTaps,
     };
 }

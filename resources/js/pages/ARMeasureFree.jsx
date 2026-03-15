@@ -1,49 +1,102 @@
-// ─────────────────────────────────────────────────────────────────────────────
-// ARMeasureFree.jsx
-//
-// Free-tap AR measurement page.
-// Works for any shape — L-cabinet, U-cabinet, straight run, ACP panel, etc.
-// User taps each corner of the shape, then presses "Done" to place the model.
-// Minimum 3 taps required. Undo removes the last tap.
-// ─────────────────────────────────────────────────────────────────────────────
-
 import { useEffect, useRef, useState } from 'react';
 import { router } from '@inertiajs/react';
 import { useWebXRFree } from '../hooks/useWebXRFree';
 
-// ── product catalog — same as ARMeasure ──────────────────────────────────────
+// ── product catalog ───────────────────────────────────────────────────────────
+// taps  = exact number of corners required for this shape
+// shape = label shown in the tap diagram
+// corners = description of which corner is which (shown as instructions)
 const MODELS = [
     {
         id: 'window1',
         name: 'Window 1',
         type: 'window',
         file: '/models/window.glb',
+        taps: 4,
+        shape: 'rectangle',
+        corners: ['Top-left', 'Top-right', 'Bottom-left', 'Bottom-right'],
+        shapeDesc: 'Standard 4-corner rectangle',
     },
     {
         id: 'window2',
         name: 'Window 2',
         type: 'window',
         file: '/models/window2.glb',
+        taps: 4,
+        shape: 'rectangle',
+        corners: ['Top-left', 'Top-right', 'Bottom-left', 'Bottom-right'],
+        shapeDesc: 'Standard 4-corner rectangle',
     },
-    { id: 'door1', name: 'Door 1', type: 'door', file: '/models/door1.glb' },
-    { id: 'door2', name: 'Door 2', type: 'door', file: '/models/door2.glb' },
+    {
+        id: 'door1',
+        name: 'Door 1',
+        type: 'door',
+        file: '/models/door1.glb',
+        taps: 4,
+        shape: 'rectangle',
+        corners: ['Top-left', 'Top-right', 'Bottom-left', 'Bottom-right'],
+        shapeDesc: 'Standard 4-corner rectangle',
+    },
+    {
+        id: 'door2',
+        name: 'Door 2',
+        type: 'door',
+        file: '/models/door2.glb',
+        taps: 4,
+        shape: 'rectangle',
+        corners: ['Top-left', 'Top-right', 'Bottom-left', 'Bottom-right'],
+        shapeDesc: 'Standard 4-corner rectangle',
+    },
     {
         id: 'cabinet1',
         name: 'L-Cabinet 1',
         type: 'cabinet',
         file: '/models/cabinet_l.glb',
+        taps: 6,
+        shape: 'l-shape',
+        corners: [
+            'Top-left',
+            'Top-middle',
+            'Inner corner',
+            'Top-right',
+            'Bottom-right',
+            'Bottom-left',
+        ],
+        shapeDesc: 'L-shape — 6 corners',
     },
     {
         id: 'cabinet2',
         name: 'L-Cabinet 2',
         type: 'cabinet',
         file: '/models/cabinet_l2.glb',
+        taps: 6,
+        shape: 'l-shape',
+        corners: [
+            'Top-left',
+            'Top-middle',
+            'Inner corner',
+            'Top-right',
+            'Bottom-right',
+            'Bottom-left',
+        ],
+        shapeDesc: 'L-shape — 6 corners',
     },
     {
         id: 'cabinet3',
         name: 'L-Cabinet 3',
         type: 'cabinet',
         file: '/models/cabinet_l3.glb',
+        taps: 6,
+        shape: 'l-shape',
+        corners: [
+            'Top-left',
+            'Top-middle',
+            'Inner corner',
+            'Top-right',
+            'Bottom-right',
+            'Bottom-left',
+        ],
+        shapeDesc: 'L-shape — 6 corners',
     },
 ];
 
@@ -69,32 +122,143 @@ const QUALITY_META = {
     good: {
         color: '#ffe600',
         label: 'Good',
-        hint: 'Tap a corner',
+        hint: 'Tap the corner',
         canTap: true,
     },
     perfect: {
         color: '#00ff88',
         label: 'Perfect',
-        hint: 'Tap a corner',
+        hint: 'Tap the corner',
         canTap: true,
     },
 };
 
 const TYPE_COLOR = {
     window: {
-        bg: 'rgba(0,200,255,0.15)',
+        bg: 'rgba(0,200,255,0.12)',
         text: '#00ccff',
-        border: '#00ccff44',
+        border: '#00ccff33',
     },
-    door: { bg: 'rgba(255,160,0,0.15)', text: '#ffa000', border: '#ffa00044' },
+    door: { bg: 'rgba(255,160,0,0.12)', text: '#ffa000', border: '#ffa00033' },
     cabinet: {
-        bg: 'rgba(180,100,255,0.15)',
+        bg: 'rgba(180,100,255,0.12)',
         text: '#b464ff',
-        border: '#b464ff44',
+        border: '#b464ff33',
     },
 };
 
-// ── ModelThumb ─────────────────────────────────────────────────────────────────
+// ── ShapeDiagram ──────────────────────────────────────────────────────────────
+// SVG diagram showing the shape and numbered tap points
+function ShapeDiagram({ shape, taps }) {
+    if (shape === 'rectangle') {
+        return (
+            <svg viewBox="0 0 200 130" style={{ width: '100%', maxWidth: 220 }}>
+                <rect
+                    x="20"
+                    y="20"
+                    width="160"
+                    height="90"
+                    fill="none"
+                    stroke="rgba(0,255,136,0.4)"
+                    strokeWidth="1.5"
+                    strokeDasharray="6,3"
+                    rx="2"
+                />
+                {[
+                    ['1', 'TL', 20, 20],
+                    ['2', 'TR', 180, 20],
+                    ['3', 'BL', 20, 110],
+                    ['4', 'BR', 180, 110],
+                ].map(([n, _, cx, cy]) => (
+                    <g key={n}>
+                        <circle
+                            cx={cx}
+                            cy={cy}
+                            r="9"
+                            fill="#00ff88"
+                            opacity="0.9"
+                        />
+                        <text
+                            x={cx}
+                            y={cy + 1}
+                            textAnchor="middle"
+                            dominantBaseline="central"
+                            fontSize="10"
+                            fontWeight="700"
+                            fill="#000"
+                        >
+                            {n}
+                        </text>
+                    </g>
+                ))}
+                <text
+                    x="100"
+                    y="68"
+                    textAnchor="middle"
+                    fontSize="11"
+                    fill="rgba(255,255,255,0.35)"
+                >
+                    4 corners
+                </text>
+            </svg>
+        );
+    }
+    if (shape === 'l-shape') {
+        // L-shape: full-width top, then drops down on the right
+        return (
+            <svg viewBox="0 0 220 160" style={{ width: '100%', maxWidth: 240 }}>
+                <polyline
+                    points="20,20 130,20 130,80 200,80 200,140 20,140 20,20"
+                    fill="none"
+                    stroke="rgba(0,255,136,0.4)"
+                    strokeWidth="1.5"
+                    strokeDasharray="6,3"
+                />
+                {[
+                    ['1', 20, 20],
+                    ['2', 130, 20],
+                    ['3', 130, 80],
+                    ['4', 200, 80],
+                    ['5', 200, 140],
+                    ['6', 20, 140],
+                ].map(([n, cx, cy]) => (
+                    <g key={n}>
+                        <circle
+                            cx={cx}
+                            cy={cy}
+                            r="10"
+                            fill="#00ff88"
+                            opacity="0.9"
+                        />
+                        <text
+                            x={cx}
+                            y={cy + 1}
+                            textAnchor="middle"
+                            dominantBaseline="central"
+                            fontSize="10"
+                            fontWeight="700"
+                            fill="#000"
+                        >
+                            {n}
+                        </text>
+                    </g>
+                ))}
+                <text
+                    x="80"
+                    y="95"
+                    textAnchor="middle"
+                    fontSize="11"
+                    fill="rgba(255,255,255,0.35)"
+                >
+                    6 corners
+                </text>
+            </svg>
+        );
+    }
+    return null;
+}
+
+// ── ModelThumb ────────────────────────────────────────────────────────────────
 function ModelThumb({ file, size = 90 }) {
     const canvasRef = useRef(null);
     const rafRef = useRef(null);
@@ -137,14 +301,13 @@ function ModelThumb({ file, size = 90 }) {
                 const ctr = new THREE.Vector3();
                 box.getSize(sz);
                 box.getCenter(ctr);
-                const s = 1.8 / Math.max(sz.x, sz.y, sz.z);
-                model.scale.setScalar(s);
-                model.position.sub(ctr.multiplyScalar(s));
+                const sc = 1.8 / Math.max(sz.x, sz.y, sz.z);
+                model.scale.setScalar(sc);
+                model.position.sub(ctr.multiplyScalar(sc));
                 scene.add(model);
             } catch (_) {
-                const geo = new THREE.BoxGeometry(1, 0.6, 1.2);
                 model = new THREE.Mesh(
-                    geo,
+                    new THREE.BoxGeometry(1, 0.6, 0.1),
                     new THREE.MeshStandardMaterial({ color: 0x334455 }),
                 );
                 scene.add(model);
@@ -175,12 +338,20 @@ function ModelThumb({ file, size = 90 }) {
     );
 }
 
-// ── ModelSelector ──────────────────────────────────────────────────────────────
-function ModelSelector({ selected, onSelect }) {
+// ── Step 1: ProductPickerScreen ───────────────────────────────────────────────
+// User scrolls through product cards and taps one to select it.
+// Tapping "Next →" advances to Step 2.
+function ProductPickerScreen({ selected, onSelect, onNext }) {
     return (
-        <div style={s.selectorWrap}>
-            <div style={s.selectorTitle}>Choose a product</div>
-            <div style={s.selectorRow}>
+        <div style={s.startWrap}>
+            <div style={s.stepHeader}>
+                <div style={s.stepPill}>Step 1 of 2</div>
+                <h1 style={s.startTitle}>Choose a product</h1>
+                <p style={s.startText}>Select what you want to place in AR.</p>
+            </div>
+
+            {/* product grid */}
+            <div style={s.productGrid}>
                 {MODELS.map((m) => {
                     const isSelected = selected?.id === m.id;
                     const tc = TYPE_COLOR[m.type] || TYPE_COLOR.window;
@@ -188,25 +359,23 @@ function ModelSelector({ selected, onSelect }) {
                         <button
                             key={m.id}
                             style={{
-                                ...s.modelCard,
+                                ...s.productCard,
                                 borderColor: isSelected
                                     ? '#00ff88'
-                                    : 'rgba(255,255,255,0.12)',
+                                    : 'rgba(255,255,255,0.1)',
                                 background: isSelected
-                                    ? 'rgba(0,255,136,0.08)'
-                                    : 'rgba(255,255,255,0.04)',
-                                transform: isSelected
-                                    ? 'scale(1.04)'
-                                    : 'scale(1)',
+                                    ? 'rgba(0,255,136,0.07)'
+                                    : 'rgba(255,255,255,0.03)',
                             }}
                             onClick={() => onSelect(m)}
                         >
-                            <div style={s.thumbWrap}>
-                                <ModelThumb file={m.file} size={90} />
+                            {isSelected && <div style={s.productCheck}>✓</div>}
+                            <div style={s.productThumb}>
+                                <ModelThumb file={m.file} size={80} />
                             </div>
                             <div
                                 style={{
-                                    ...s.typePill,
+                                    ...s.productTypePill,
                                     background: tc.bg,
                                     color: tc.text,
                                     border: `1px solid ${tc.border}`,
@@ -216,42 +385,62 @@ function ModelSelector({ selected, onSelect }) {
                             </div>
                             <div
                                 style={{
-                                    ...s.modelName,
+                                    ...s.productName,
                                     color: isSelected ? '#00ff88' : '#fff',
                                 }}
                             >
                                 {m.name}
                             </div>
-                            {isSelected && <div style={s.selectedMark}>✓</div>}
+                            <div style={s.productTapBadge}>{m.taps} taps</div>
                         </button>
                     );
                 })}
             </div>
+
+            <button
+                style={{ ...s.btnPrimary, opacity: selected ? 1 : 0.4 }}
+                disabled={!selected}
+                onClick={onNext}
+            >
+                Next — see tap guide →
+            </button>
         </div>
     );
 }
 
-// ── TapCounter ────────────────────────────────────────────────────────────────
-// Shows how many corners have been tapped + a hint about the shape
-function TapCounter({ count, canConfirm }) {
-    const shapeHint =
-        count < 3
-            ? 'Tap at least 3 corners'
-            : count === 4
-              ? 'Rectangle / straight run'
-              : count === 5
-                ? 'L-shape'
-                : count === 6
-                  ? 'U-shape or 6-corner run'
-                  : `${count}-corner shape`;
+// ── Step 2: TapGuideScreen ────────────────────────────────────────────────────
+// Shows the shape diagram, numbered corner list, and the Start AR button.
+function TapGuideScreen({ model, onBack, onStart }) {
     return (
-        <div style={s.tapCounter}>
-            <div style={s.tapCountNum}>{count}</div>
-            <div style={s.tapCountLabel}>corners tapped</div>
-            <div style={s.tapCountHint}>{shapeHint}</div>
-            {canConfirm && (
-                <div style={s.tapCountReady}>Ready — tap "Done" to place</div>
-            )}
+        <div style={s.startWrap}>
+            <div style={s.stepHeader}>
+                <div style={s.stepPill}>Step 2 of 2</div>
+                <h1 style={s.startTitle}>{model.name}</h1>
+                <p style={s.startText}>{model.shapeDesc}</p>
+            </div>
+
+            {/* shape diagram */}
+            <div style={s.diagramWrap}>
+                <ShapeDiagram shape={model.shape} taps={model.taps} />
+            </div>
+
+            {/* numbered corner list */}
+            <div style={s.cornerList}>
+                <div style={s.cornerListTitle}>Tap order</div>
+                {model.corners.map((label, i) => (
+                    <div key={i} style={s.cornerRow}>
+                        <div style={s.cornerNum}>{i + 1}</div>
+                        <div style={s.cornerLabel}>{label}</div>
+                    </div>
+                ))}
+            </div>
+
+            <button style={s.btnPrimary} onClick={onStart}>
+                Start AR — {model.taps} taps
+            </button>
+            <button style={s.btnGhost} onClick={onBack}>
+                ← Back to products
+            </button>
         </div>
     );
 }
@@ -275,59 +464,72 @@ function QualityBadge({ quality }) {
     );
 }
 
-// ── TapToolbar ────────────────────────────────────────────────────────────────
-// Fixed bottom bar during tapping: Undo, tap count, Done
-function TapToolbar({ tapCount, canConfirm, onUndo, onDone, quality }) {
+// ── TapProgress ───────────────────────────────────────────────────────────────
+// Bottom bar shown during tapping — shows progress and current corner name
+function TapProgress({
+    tapCount,
+    requiredTaps,
+    corners,
+    canUndo,
+    onUndo,
+    quality,
+}) {
     const meta = QUALITY_META[quality] || QUALITY_META.none;
     const canTap = meta.canTap;
-    return (
-        <div style={s.toolbar}>
-            {/* undo button */}
-            <button
-                style={{ ...s.toolbarBtn, opacity: tapCount > 0 ? 1 : 0.35 }}
-                onClick={onUndo}
-                disabled={tapCount === 0}
-            >
-                ↩ Undo
-            </button>
+    const currentCorner = corners[tapCount] || null;
+    const progress = Math.min(tapCount / requiredTaps, 1);
 
-            {/* center: quality + tap count */}
-            <div style={s.toolbarCenter}>
+    return (
+        <div style={s.tapBar}>
+            {/* progress track */}
+            <div style={s.progressTrack}>
                 <div
-                    style={{
-                        ...s.toolbarQuality,
-                        color:
-                            meta.color === 'transparent' ? '#666' : meta.color,
-                    }}
-                >
-                    {meta.color !== 'transparent' && (
-                        <div
-                            style={{
-                                ...s.qualityDot,
-                                background: meta.color,
-                                marginRight: 5,
-                            }}
-                        />
-                    )}
-                    {canTap ? `${tapCount} tapped — tap to add` : meta.hint}
-                </div>
+                    style={{ ...s.progressFill, width: `${progress * 100}%` }}
+                />
             </div>
 
-            {/* done button */}
-            <button
-                style={{
-                    ...s.toolbarDoneBtn,
-                    opacity: canConfirm ? 1 : 0.35,
-                    background: canConfirm
-                        ? '#00ff88'
-                        : 'rgba(255,255,255,0.1)',
-                    color: canConfirm ? '#000' : '#666',
-                }}
-                onClick={onDone}
-                disabled={!canConfirm}
-            >
-                Done ✓
-            </button>
+            <div style={s.tapBarInner}>
+                {/* undo */}
+                <button
+                    style={{ ...s.undoBtn, opacity: canUndo ? 1 : 0.3 }}
+                    onClick={onUndo}
+                    disabled={!canUndo}
+                >
+                    ↩
+                </button>
+
+                {/* center info */}
+                <div style={s.tapBarCenter}>
+                    <div style={s.tapBarCount}>
+                        <span style={s.tapBarNum}>{tapCount}</span>
+                        <span style={s.tapBarOf}> / {requiredTaps}</span>
+                    </div>
+                    {currentCorner && canTap && (
+                        <div style={s.tapBarCorner}>{currentCorner}</div>
+                    )}
+                    {!canTap && quality !== 'none' && (
+                        <div style={{ ...s.tapBarCorner, color: meta.color }}>
+                            {meta.hint}
+                        </div>
+                    )}
+                    {quality === 'none' && (
+                        <div style={{ ...s.tapBarCorner, color: '#666' }}>
+                            Point camera at surface
+                        </div>
+                    )}
+                </div>
+
+                {/* quality indicator */}
+                <div
+                    style={{
+                        ...s.tapBarQuality,
+                        color:
+                            meta.color === 'transparent' ? '#444' : meta.color,
+                    }}
+                >
+                    {meta.label || '—'}
+                </div>
+            </div>
         </div>
     );
 }
@@ -335,7 +537,7 @@ function TapToolbar({ tapCount, canConfirm, onUndo, onDone, quality }) {
 // ── ResultCard ────────────────────────────────────────────────────────────────
 function ResultCard({
     dimensions,
-    selectedModel,
+    model,
     tapCount,
     onConfirm,
     onReset,
@@ -354,32 +556,23 @@ function ResultCard({
                 </div>
             )}
             {modelError && <div style={s.modelStatusError}>{modelError}</div>}
-
-            <div style={s.resultTitle}>Area measured</div>
-
-            <div style={s.resultMeta}>
-                <div style={s.resultMetaItem}>
-                    <span style={s.resultMetaVal}>{tapCount}</span>
-                    <span style={s.resultMetaLabel}>corners</span>
+            <div style={s.resultTitle}>Measured</div>
+            <div style={s.resultDims}>
+                <div style={s.dimBox}>
+                    <span style={s.dimValue}>{dimensions.widthCm}</span>
+                    <span style={s.dimUnit}>cm wide</span>
                 </div>
-                <div style={s.resultMetaSep}>·</div>
-                <div style={s.resultMetaItem}>
-                    <span style={s.resultMetaVal}>{dimensions.widthCm}</span>
-                    <span style={s.resultMetaLabel}>cm wide</span>
-                </div>
-                <div style={s.resultMetaSep}>×</div>
-                <div style={s.resultMetaItem}>
-                    <span style={s.resultMetaVal}>{dimensions.heightCm}</span>
-                    <span style={s.resultMetaLabel}>cm tall</span>
+                <div style={s.dimSep}>×</div>
+                <div style={s.dimBox}>
+                    <span style={s.dimValue}>{dimensions.heightCm}</span>
+                    <span style={s.dimUnit}>cm tall</span>
                 </div>
             </div>
-
-            {modelPlaced && selectedModel && (
+            {modelPlaced && model && (
                 <div style={s.placedModel}>
-                    Showing: <strong>{selectedModel.name}</strong>
+                    Showing: <strong>{model.name}</strong>
                 </div>
             )}
-
             <div style={s.resultButtons}>
                 <button style={s.btnSecondary} onClick={onReset}>
                     Re-measure
@@ -430,8 +623,7 @@ function UnsupportedCard({ onBack }) {
             <div style={s.unsupportedIcon}>⚠</div>
             <h2 style={s.unsupportedTitle}>AR not available</h2>
             <p style={s.unsupportedText}>
-                WebXR AR requires <strong>Android Chrome</strong> on a
-                compatible device.
+                WebXR AR requires <strong>Android Chrome</strong>.
             </p>
             <button style={s.btnPrimary} onClick={onBack}>
                 Enter measurements manually
@@ -448,7 +640,8 @@ export default function ARMeasureFree() {
 
     const [checked, setChecked] = useState(false);
     const [hintDismissed, setHintDismissed] = useState(false);
-    const [selectedModel, setSelectedModel] = useState(MODELS[0]);
+    const [selectedModel, setSelectedModel] = useState(null); // null = nothing picked yet
+    const [screen, setScreen] = useState('pick'); // 'pick' | 'guide' | 'ar'
 
     const {
         isSupported,
@@ -467,6 +660,7 @@ export default function ARMeasureFree() {
         reset,
         resetModelTransform,
         setSelectedModel: setHookModel,
+        setRequiredTaps,
         handleUndo,
         handleConfirm: confirmAndPlace,
     } = useWebXRFree();
@@ -477,23 +671,25 @@ export default function ARMeasureFree() {
     useEffect(() => {
         if (modelPlaced) setHintDismissed(false);
     }, [modelPlaced]);
+
+    // sync selected model to hook
     useEffect(() => {
-        setHookModel(selectedModel.file);
+        if (selectedModel) {
+            setHookModel(selectedModel.file);
+            setRequiredTaps(selectedModel.taps);
+        }
     }, [selectedModel]);
 
-    // ── gesture listeners ─────────────────────────────────────────────────────
+    // gesture listeners
     useEffect(() => {
         const el = gestureRef.current;
         if (!el) return;
         let lastX = 0,
             lastY = 0,
             lastMidY = 0,
-            touchCount = 0,
             intent = null;
-
         function onStart(e) {
             if (!window.__arModel) return;
-            touchCount = e.touches.length;
             intent = null;
             if (e.touches.length === 1) {
                 lastX = e.touches[0].clientX;
@@ -532,7 +728,6 @@ export default function ARMeasureFree() {
             }
         }
         function onEnd(e) {
-            touchCount = e.touches.length;
             if (e.touches.length === 0) intent = null;
             else if (e.touches.length === 1) {
                 lastX = e.touches[0].clientX;
@@ -550,8 +745,22 @@ export default function ARMeasureFree() {
         };
     }, []);
 
-    const handleStart = () => startAR(canvasRef.current, overlayRef.current);
-    const handleManual = () => router.visit('/measure/manual');
+    const handlePickSelect = (m) => setSelectedModel(m);
+    const handlePickNext = () => setScreen('guide');
+    const handleGuideBack = () => setScreen('pick');
+    const handleGuideStart = () => {
+        setScreen('ar');
+        startAR(canvasRef.current, overlayRef.current);
+    };
+    const handleStopAR = () => {
+        stopAR();
+        setScreen('pick');
+    };
+    const handleReset = () => {
+        setHintDismissed(false);
+        reset();
+        // stay in AR, user re-taps corners
+    };
     const handleConfirm = () => {
         if (!dimensions) return;
         stopAR();
@@ -559,24 +768,23 @@ export default function ARMeasureFree() {
             data: { w: dimensions.widthCm, h: dimensions.heightCm },
         });
     };
-    const handleReset = () => {
-        setHintDismissed(false);
-        reset();
-    };
 
     if (!checked) return <div style={s.loading}>Checking AR support…</div>;
-    if (isSupported === false) return <UnsupportedCard onBack={handleManual} />;
+    if (isSupported === false)
+        return (
+            <UnsupportedCard onBack={() => router.visit('/measure/manual')} />
+        );
 
     const qualityMeta = QUALITY_META[reticleQuality] || QUALITY_META.none;
     const canTap = qualityMeta.canTap;
     const showReticle = isActive && !modelPlaced;
     const showHint = modelPlaced && !hintDismissed && !modelLoading;
+    const requiredTaps = selectedModel?.taps ?? 4;
+    const corners = selectedModel?.corners ?? [];
 
     return (
         <div style={s.root}>
             <canvas ref={canvasRef} style={s.canvas} />
-
-            {/* gesture layer */}
             <div
                 ref={gestureRef}
                 style={{
@@ -585,145 +793,120 @@ export default function ARMeasureFree() {
                 }}
             />
 
-            {/* XR overlay */}
             <div ref={overlayRef} style={s.overlay}>
-                {/* top bar */}
-                <div style={s.topBar}>
-                    <button style={s.closeBtn} onClick={stopAR}>
-                        ✕ Exit
-                    </button>
-                    <div style={s.topBarRight}>
-                        {isActive && !modelPlaced && (
-                            <div style={s.selectedBadge}>
-                                {selectedModel.name}
-                            </div>
-                        )}
-                        <QualityBadge quality={reticleQuality} />
-                    </div>
-                </div>
-
-                {/* reticle */}
-                {showReticle && (
-                    <div style={s.reticleGuide}>
-                        <div
-                            style={{
-                                ...s.reticleRing,
-                                borderColor:
-                                    qualityMeta.color === 'transparent'
-                                        ? 'rgba(255,255,255,0.3)'
-                                        : qualityMeta.color,
-                                boxShadow: canTap
-                                    ? `0 0 12px ${qualityMeta.color}88`
-                                    : 'none',
-                                animation: canTap
-                                    ? 'pulse 1.2s ease-in-out infinite'
-                                    : 'none',
-                            }}
-                        />
-                        <div
-                            style={{
-                                ...s.reticleDot,
-                                background:
-                                    qualityMeta.color === 'transparent'
-                                        ? 'rgba(255,255,255,0.4)'
-                                        : qualityMeta.color,
-                            }}
-                        />
-                        {!canTap && reticleQuality !== 'none' && (
-                            <div style={s.reticleLock}>
-                                <div style={s.reticleLockIcon}>⊘</div>
-                            </div>
-                        )}
-                    </div>
-                )}
-
-                <style>{`
-                    @keyframes pulse{0%,100%{transform:translate(-50%,-50%) scale(1);opacity:1;}50%{transform:translate(-50%,-50%) scale(1.15);opacity:0.75;}}
-                    @keyframes spin{to{transform:rotate(360deg);}}
-                    @keyframes fadeIn{from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:translateY(0);}}
-                    @keyframes slideUp{from{opacity:0;transform:translateY(40px);}to{opacity:1;transform:translateY(0);}}
-                `}</style>
-
-                {/* tap toolbar — shown while measuring */}
-                {isActive && !modelPlaced && (
-                    <TapToolbar
-                        tapCount={tapCount}
-                        canConfirm={canConfirm}
-                        quality={reticleQuality}
-                        onUndo={handleUndo}
-                        onDone={confirmAndPlace}
+                {/* ── step 1: product picker ── */}
+                {screen === 'pick' && (
+                    <ProductPickerScreen
+                        selected={selectedModel}
+                        onSelect={handlePickSelect}
+                        onNext={handlePickNext}
                     />
                 )}
 
-                {/* gesture hint */}
-                {showHint && (
-                    <GestureHint onDismiss={() => setHintDismissed(true)} />
-                )}
-
-                {/* result card */}
-                {dimensions?.widthCm && dimensions?.heightCm && (
-                    <ResultCard
-                        dimensions={dimensions}
-                        selectedModel={selectedModel}
-                        tapCount={tapCount}
-                        onConfirm={handleConfirm}
-                        onReset={handleReset}
-                        onResetPos={resetModelTransform}
-                        modelLoading={modelLoading}
-                        modelError={modelError}
-                        modelPlaced={modelPlaced}
+                {/* ── step 2: tap guide ── */}
+                {screen === 'guide' && selectedModel && (
+                    <TapGuideScreen
+                        model={selectedModel}
+                        onBack={handleGuideBack}
+                        onStart={handleGuideStart}
                     />
                 )}
 
-                {error && <div style={s.errorBanner}>{error}</div>}
-
-                {/* start screen */}
-                {!isActive && !error && (
-                    <div style={s.startWrap}>
-                        <h1 style={s.startTitle}>Measure any shape</h1>
-                        <p style={s.startText}>
-                            Tap each corner of the cabinet, window or opening —
-                            any number of corners. Press{' '}
-                            <strong style={{ color: '#00ff88' }}>Done</strong>{' '}
-                            when finished.
-                        </p>
-
-                        {/* shape examples */}
-                        <div style={s.shapeExamples}>
-                            {[
-                                {
-                                    label: 'Rectangle',
-                                    taps: '4 taps',
-                                    icon: '▬',
-                                },
-                                { label: 'L-shape', taps: '5 taps', icon: '⌐' },
-                                { label: 'U-shape', taps: '6 taps', icon: '⊓' },
-                                {
-                                    label: 'Any shape',
-                                    taps: 'N taps',
-                                    icon: '⬡',
-                                },
-                            ].map((ex) => (
-                                <div key={ex.label} style={s.shapeCard}>
-                                    <div style={s.shapeIcon}>{ex.icon}</div>
-                                    <div style={s.shapeLabel}>{ex.label}</div>
-                                    <div style={s.shapeTaps}>{ex.taps}</div>
-                                </div>
-                            ))}
+                {/* ── step 3: AR session ── */}
+                {screen === 'ar' && (
+                    <>
+                        {/* top bar */}
+                        <div style={s.topBar}>
+                            <button style={s.closeBtn} onClick={handleStopAR}>
+                                ✕ Exit
+                            </button>
+                            <div style={s.topBarRight}>
+                                {!modelPlaced && (
+                                    <div style={s.selectedBadge}>
+                                        {selectedModel?.name}
+                                    </div>
+                                )}
+                                <QualityBadge quality={reticleQuality} />
+                            </div>
                         </div>
 
-                        <ModelSelector
-                            selected={selectedModel}
-                            onSelect={setSelectedModel}
-                        />
+                        {/* reticle */}
+                        {showReticle && (
+                            <div style={s.reticleGuide}>
+                                <div
+                                    style={{
+                                        ...s.reticleRing,
+                                        borderColor:
+                                            qualityMeta.color === 'transparent'
+                                                ? 'rgba(255,255,255,0.3)'
+                                                : qualityMeta.color,
+                                        boxShadow: canTap
+                                            ? `0 0 12px ${qualityMeta.color}88`
+                                            : 'none',
+                                        animation: canTap
+                                            ? 'pulse 1.2s ease-in-out infinite'
+                                            : 'none',
+                                    }}
+                                />
+                                <div
+                                    style={{
+                                        ...s.reticleDot,
+                                        background:
+                                            qualityMeta.color === 'transparent'
+                                                ? 'rgba(255,255,255,0.4)'
+                                                : qualityMeta.color,
+                                    }}
+                                />
+                                {!canTap && reticleQuality !== 'none' && (
+                                    <div style={s.reticleLock}>
+                                        <div style={s.reticleLockIcon}>⊘</div>
+                                    </div>
+                                )}
+                            </div>
+                        )}
 
-                        <button style={s.btnPrimary} onClick={handleStart}>
-                            Start AR — {selectedModel.name}
-                        </button>
-                        <button style={s.btnGhost} onClick={handleManual}>
-                            Enter measurements manually
-                        </button>
-                    </div>
+                        <style>{`
+                            @keyframes pulse{0%,100%{transform:translate(-50%,-50%) scale(1);opacity:1;}50%{transform:translate(-50%,-50%) scale(1.15);opacity:0.75;}}
+                            @keyframes spin{to{transform:rotate(360deg);}}
+                            @keyframes fadeIn{from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:translateY(0);}}
+                        `}</style>
+
+                        {/* tap progress bar — shown while measuring */}
+                        {!modelPlaced && (
+                            <TapProgress
+                                tapCount={tapCount}
+                                requiredTaps={requiredTaps}
+                                corners={corners}
+                                canUndo={tapCount > 0}
+                                onUndo={handleUndo}
+                                quality={reticleQuality}
+                            />
+                        )}
+
+                        {/* gesture hint */}
+                        {showHint && (
+                            <GestureHint
+                                onDismiss={() => setHintDismissed(true)}
+                            />
+                        )}
+
+                        {/* result card */}
+                        {dimensions?.widthCm && dimensions?.heightCm && (
+                            <ResultCard
+                                dimensions={dimensions}
+                                model={selectedModel}
+                                tapCount={tapCount}
+                                onConfirm={handleConfirm}
+                                onReset={handleReset}
+                                onResetPos={resetModelTransform}
+                                modelLoading={modelLoading}
+                                modelError={modelError}
+                                modelPlaced={modelPlaced}
+                            />
+                        )}
+
+                        {error && <div style={s.errorBanner}>{error}</div>}
+                    </>
                 )}
             </div>
         </div>
@@ -767,6 +950,128 @@ const s = {
         fontFamily: "'Inter',sans-serif",
         zIndex: 10,
     },
+    // start screens
+    startWrap: {
+        position: 'absolute',
+        bottom: 0,
+        left: 0,
+        right: 0,
+        background: 'rgba(5,5,15,0.97)',
+        borderRadius: '24px 24px 0 0',
+        padding: '24px 20px 48px',
+        pointerEvents: 'auto',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 14,
+        maxHeight: '92vh',
+        overflowY: 'auto',
+    },
+    stepHeader: { display: 'flex', flexDirection: 'column', gap: 4 },
+    stepPill: {
+        display: 'inline-block',
+        background: 'rgba(0,255,136,0.12)',
+        color: '#00ff88',
+        border: '1px solid rgba(0,255,136,0.3)',
+        borderRadius: 20,
+        padding: '3px 12px',
+        fontSize: 11,
+        fontWeight: 700,
+        letterSpacing: 1,
+        alignSelf: 'flex-start',
+    },
+    startTitle: { fontSize: 22, fontWeight: 700, color: '#fff', margin: 0 },
+    startText: {
+        fontSize: 14,
+        color: 'rgba(255,255,255,0.5)',
+        margin: 0,
+        lineHeight: 1.5,
+    },
+    // product grid (2 columns)
+    productGrid: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 },
+    productCard: {
+        background: 'rgba(255,255,255,0.03)',
+        border: '1.5px solid',
+        borderRadius: 14,
+        padding: '12px 10px',
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        gap: 6,
+        cursor: 'pointer',
+        transition: 'all 0.2s',
+        position: 'relative',
+    },
+    productCheck: {
+        position: 'absolute',
+        top: 8,
+        right: 10,
+        fontSize: 14,
+        color: '#00ff88',
+        fontWeight: 700,
+    },
+    productThumb: {
+        width: 80,
+        height: 80,
+        borderRadius: 8,
+        overflow: 'hidden',
+        background: 'rgba(255,255,255,0.03)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
+    productTypePill: {
+        fontSize: 10,
+        fontWeight: 700,
+        letterSpacing: 1,
+        textTransform: 'uppercase',
+        padding: '2px 8px',
+        borderRadius: 20,
+    },
+    productName: { fontSize: 13, fontWeight: 600, textAlign: 'center' },
+    productTapBadge: {
+        fontSize: 11,
+        color: 'rgba(255,255,255,0.35)',
+        fontWeight: 500,
+    },
+    // tap guide
+    diagramWrap: {
+        display: 'flex',
+        justifyContent: 'center',
+        padding: '8px 0',
+        background: 'rgba(255,255,255,0.03)',
+        borderRadius: 12,
+    },
+    cornerList: { display: 'flex', flexDirection: 'column', gap: 0 },
+    cornerListTitle: {
+        fontSize: 11,
+        fontWeight: 700,
+        color: 'rgba(255,255,255,0.4)',
+        letterSpacing: 1.5,
+        textTransform: 'uppercase',
+        marginBottom: 8,
+    },
+    cornerRow: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 10,
+        padding: '8px 0',
+        borderBottom: '1px solid rgba(255,255,255,0.06)',
+    },
+    cornerNum: {
+        width: 24,
+        height: 24,
+        borderRadius: '50%',
+        background: '#00ff88',
+        color: '#000',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        fontSize: 12,
+        fontWeight: 700,
+        flexShrink: 0,
+    },
+    cornerLabel: { fontSize: 14, color: 'rgba(255,255,255,0.8)' },
+    // AR top bar
     topBar: {
         width: '100%',
         display: 'flex',
@@ -785,6 +1090,15 @@ const s = {
         cursor: 'pointer',
     },
     topBarRight: { display: 'flex', alignItems: 'center', gap: 8 },
+    selectedBadge: {
+        background: 'rgba(0,0,0,0.6)',
+        color: '#00ff88',
+        border: '1px solid rgba(0,255,136,0.3)',
+        borderRadius: 20,
+        padding: '5px 12px',
+        fontSize: 12,
+        fontWeight: 600,
+    },
     qualityBadge: {
         display: 'flex',
         alignItems: 'center',
@@ -795,15 +1109,7 @@ const s = {
         fontWeight: 600,
     },
     qualityDot: { width: 7, height: 7, borderRadius: '50%' },
-    selectedBadge: {
-        background: 'rgba(0,0,0,0.6)',
-        color: '#00ff88',
-        border: '1px solid rgba(0,255,136,0.3)',
-        borderRadius: 20,
-        padding: '5px 12px',
-        fontSize: 12,
-        fontWeight: 600,
-    },
+    // reticle
     reticleGuide: {
         position: 'absolute',
         top: '50%',
@@ -847,50 +1153,68 @@ const s = {
         color: 'rgba(255,255,255,0.5)',
         lineHeight: 1,
     },
-    // toolbar
-    toolbar: {
+    // tap progress bar
+    tapBar: {
         position: 'absolute',
         bottom: 0,
         left: 0,
         right: 0,
-        background: 'rgba(5,5,15,0.92)',
+        background: 'rgba(5,5,15,0.94)',
         backdropFilter: 'blur(16px)',
         borderRadius: '20px 20px 0 0',
-        padding: '14px 16px 32px',
-        display: 'flex',
-        alignItems: 'center',
-        gap: 10,
+        paddingBottom: 32,
         pointerEvents: 'auto',
         zIndex: 50,
     },
-    toolbarBtn: {
-        padding: '10px 16px',
-        background: 'rgba(255,255,255,0.1)',
-        color: '#fff',
-        border: '1px solid rgba(255,255,255,0.2)',
-        borderRadius: 10,
-        fontSize: 14,
-        fontWeight: 500,
-        cursor: 'pointer',
-        whiteSpace: 'nowrap',
+    progressTrack: {
+        height: 3,
+        background: 'rgba(255,255,255,0.08)',
+        borderRadius: '20px 20px 0 0',
+        overflow: 'hidden',
     },
-    toolbarCenter: {
+    progressFill: {
+        height: '100%',
+        background: '#00ff88',
+        borderRadius: 2,
+        transition: 'width 0.3s ease',
+    },
+    tapBarInner: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 12,
+        padding: '12px 16px 0',
+    },
+    undoBtn: {
+        padding: '8px 14px',
+        background: 'rgba(255,255,255,0.08)',
+        color: '#fff',
+        border: '1px solid rgba(255,255,255,0.15)',
+        borderRadius: 10,
+        fontSize: 16,
+        cursor: 'pointer',
+        flexShrink: 0,
+    },
+    tapBarCenter: {
         flex: 1,
         display: 'flex',
         flexDirection: 'column',
         alignItems: 'center',
         gap: 2,
     },
-    toolbarQuality: { fontSize: 12, display: 'flex', alignItems: 'center' },
-    toolbarDoneBtn: {
-        padding: '10px 20px',
-        border: 'none',
-        borderRadius: 10,
-        fontSize: 14,
+    tapBarCount: { fontSize: 15, fontWeight: 700, color: '#fff' },
+    tapBarNum: { fontSize: 22, fontWeight: 700, color: '#00ff88' },
+    tapBarOf: { fontSize: 14, color: 'rgba(255,255,255,0.4)' },
+    tapBarCorner: {
+        fontSize: 12,
+        color: 'rgba(255,255,255,0.6)',
+        textAlign: 'center',
+    },
+    tapBarQuality: {
+        fontSize: 12,
         fontWeight: 700,
-        cursor: 'pointer',
-        whiteSpace: 'nowrap',
-        transition: 'all 0.2s',
+        minWidth: 40,
+        textAlign: 'right',
+        flexShrink: 0,
     },
     // result card
     resultCard: {
@@ -915,35 +1239,17 @@ const s = {
         marginBottom: 12,
         textAlign: 'center',
     },
-    resultMeta: {
+    resultDims: {
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
-        gap: 8,
+        gap: 12,
         marginBottom: 14,
-        flexWrap: 'wrap',
     },
-    resultMetaItem: {
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-    },
-    resultMetaVal: {
-        fontSize: 28,
-        fontWeight: 700,
-        color: '#fff',
-        lineHeight: 1,
-    },
-    resultMetaLabel: {
-        fontSize: 11,
-        color: 'rgba(255,255,255,0.5)',
-        marginTop: 2,
-    },
-    resultMetaSep: {
-        fontSize: 20,
-        color: 'rgba(255,255,255,0.2)',
-        alignSelf: 'center',
-    },
+    dimBox: { display: 'flex', flexDirection: 'column', alignItems: 'center' },
+    dimValue: { fontSize: 34, fontWeight: 700, color: '#fff', lineHeight: 1 },
+    dimUnit: { fontSize: 11, color: 'rgba(255,255,255,0.5)', marginTop: 3 },
+    dimSep: { fontSize: 24, color: 'rgba(255,255,255,0.3)' },
     placedModel: {
         fontSize: 12,
         color: 'rgba(255,255,255,0.5)',
@@ -961,6 +1267,7 @@ const s = {
         fontSize: 14,
         fontWeight: 600,
         cursor: 'pointer',
+        transition: 'opacity 0.2s',
     },
     btnSecondary: {
         flex: 0,
@@ -974,19 +1281,19 @@ const s = {
         whiteSpace: 'nowrap',
     },
     btnGhost: {
-        padding: '14px 20px',
+        padding: '13px 20px',
         background: 'transparent',
-        color: 'rgba(255,255,255,0.6)',
-        border: '1px solid rgba(255,255,255,0.2)',
+        color: 'rgba(255,255,255,0.5)',
+        border: '1px solid rgba(255,255,255,0.15)',
         borderRadius: 12,
         fontSize: 14,
         cursor: 'pointer',
-        width: '100%',
+        textAlign: 'center',
     },
     // gesture hint
     gestureHint: {
         position: 'absolute',
-        bottom: 120,
+        bottom: 100,
         left: 20,
         right: 20,
         zIndex: 100,
@@ -1027,125 +1334,7 @@ const s = {
         fontWeight: 700,
         cursor: 'pointer',
     },
-    // model selector
-    selectorWrap: { width: '100%', marginBottom: 4 },
-    selectorTitle: {
-        fontSize: 11,
-        fontWeight: 600,
-        color: 'rgba(255,255,255,0.5)',
-        letterSpacing: 1.5,
-        textTransform: 'uppercase',
-        marginBottom: 10,
-    },
-    selectorRow: {
-        display: 'flex',
-        gap: 10,
-        overflowX: 'auto',
-        paddingBottom: 4,
-        WebkitOverflowScrolling: 'touch',
-    },
-    modelCard: {
-        flexShrink: 0,
-        width: 110,
-        background: 'rgba(255,255,255,0.04)',
-        border: '1.5px solid',
-        borderRadius: 14,
-        padding: '10px 8px',
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        gap: 6,
-        cursor: 'pointer',
-        transition: 'all 0.2s ease',
-        pointerEvents: 'auto',
-        position: 'relative',
-    },
-    thumbWrap: {
-        width: 90,
-        height: 90,
-        borderRadius: 8,
-        overflow: 'hidden',
-        background: 'rgba(255,255,255,0.03)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-    },
-    typePill: {
-        fontSize: 10,
-        fontWeight: 700,
-        letterSpacing: 1,
-        textTransform: 'uppercase',
-        padding: '2px 8px',
-        borderRadius: 20,
-    },
-    modelName: {
-        fontSize: 12,
-        fontWeight: 600,
-        textAlign: 'center',
-        transition: 'color 0.2s',
-    },
-    selectedMark: {
-        position: 'absolute',
-        top: 6,
-        right: 8,
-        fontSize: 12,
-        color: '#00ff88',
-        fontWeight: 700,
-    },
-    // shape examples
-    shapeExamples: { display: 'flex', gap: 8, marginBottom: 4 },
-    shapeCard: {
-        flex: 1,
-        background: 'rgba(255,255,255,0.05)',
-        borderRadius: 10,
-        padding: '10px 6px',
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        gap: 4,
-    },
-    shapeIcon: { fontSize: 20, color: 'rgba(255,255,255,0.5)' },
-    shapeLabel: {
-        fontSize: 11,
-        fontWeight: 600,
-        color: 'rgba(255,255,255,0.7)',
-        textAlign: 'center',
-    },
-    shapeTaps: { fontSize: 10, color: '#00ff88', fontWeight: 600 },
     // misc
-    tapCounter: {
-        position: 'absolute',
-        top: 80,
-        left: '50%',
-        transform: 'translateX(-50%)',
-        background: 'rgba(0,0,0,0.7)',
-        borderRadius: 16,
-        padding: '12px 20px',
-        textAlign: 'center',
-        pointerEvents: 'none',
-    },
-    tapCountNum: {
-        fontSize: 36,
-        fontWeight: 700,
-        color: '#00ff88',
-        lineHeight: 1,
-    },
-    tapCountLabel: {
-        fontSize: 11,
-        color: 'rgba(255,255,255,0.5)',
-        marginTop: 2,
-    },
-    tapCountHint: {
-        fontSize: 12,
-        color: 'rgba(255,255,255,0.7)',
-        marginTop: 4,
-    },
-    tapCountReady: {
-        fontSize: 11,
-        color: '#ffe600',
-        marginTop: 4,
-        fontWeight: 600,
-    },
     errorBanner: {
         position: 'absolute',
         bottom: 100,
@@ -1158,28 +1347,6 @@ const s = {
         fontSize: 14,
         textAlign: 'center',
         pointerEvents: 'auto',
-    },
-    startWrap: {
-        position: 'absolute',
-        bottom: 0,
-        left: 0,
-        right: 0,
-        background: 'rgba(5,5,15,0.97)',
-        borderRadius: '24px 24px 0 0',
-        padding: '24px 20px 44px',
-        pointerEvents: 'auto',
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 12,
-        maxHeight: '90vh',
-        overflowY: 'auto',
-    },
-    startTitle: { fontSize: 22, fontWeight: 700, color: '#fff', margin: 0 },
-    startText: {
-        fontSize: 14,
-        color: 'rgba(255,255,255,0.6)',
-        lineHeight: 1.5,
-        margin: 0,
     },
     loading: {
         display: 'flex',
