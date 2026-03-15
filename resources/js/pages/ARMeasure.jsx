@@ -535,6 +535,7 @@ export default function ARMeasure() {
     const [hintDismissed, setHintDismissed] = useState(false);
     const [selectedModel, setSelectedModel] = useState(MODELS[0]); // default: first item
     const [showSwapSheet, setShowSwapSheet] = useState(false);
+    const [debugLog, setDebugLog] = useState([]);
 
     const {
         isSupported,
@@ -554,6 +555,22 @@ export default function ARMeasure() {
         setSelectedModel: setHookModel,
         swapModel,
     } = useWebXR();
+
+    const dbg = (msg) => setDebugLog((prev) => [...prev.slice(-8), msg]);
+
+    // poll window.__dbg every 500ms so hook logs appear on screen
+    useEffect(() => {
+        const t = setInterval(() => {
+            if (window.__dbg?.length) {
+                setDebugLog((prev) => {
+                    const combined = [...prev, ...window.__dbg].slice(-8);
+                    window.__dbg = [];
+                    return combined;
+                });
+            }
+        }, 500);
+        return () => clearInterval(t);
+    }, []);
 
     useEffect(() => {
         checkSupport().then(() => setChecked(true));
@@ -645,10 +662,16 @@ export default function ARMeasure() {
     // Uses swapModel() from useWebXR which removes the old model and loads
     // the new one at the SAME saved corners. No re-tapping required.
     const handleSwapSelect = async (newModel) => {
+        dbg('swap start: ' + newModel.name);
         setSelectedModel(newModel);
         setHookModel(newModel.file);
         setShowSwapSheet(false);
-        await swapModel(newModel.file);
+        try {
+            await swapModel(newModel.file);
+            dbg('swap done: ' + newModel.name);
+        } catch (e) {
+            dbg('swap ERROR: ' + e.message);
+        }
     };
 
     const handleStart = () => startAR(canvasRef.current, overlayRef.current);
@@ -677,6 +700,36 @@ export default function ARMeasure() {
     return (
         <div style={s.root}>
             <canvas ref={canvasRef} style={s.canvas} />
+
+            {/* debug overlay */}
+            {debugLog.length > 0 && (
+                <div
+                    style={{
+                        position: 'absolute',
+                        top: 80,
+                        left: 10,
+                        right: 10,
+                        zIndex: 999,
+                        background: 'rgba(0,0,0,0.85)',
+                        borderRadius: 8,
+                        padding: 10,
+                        pointerEvents: 'none',
+                    }}
+                >
+                    {debugLog.map((l, i) => (
+                        <div
+                            key={i}
+                            style={{
+                                color: '#0f0',
+                                fontSize: 11,
+                                fontFamily: 'monospace',
+                            }}
+                        >
+                            {l}
+                        </div>
+                    ))}
+                </div>
+            )}
 
             {/* gesture layer */}
             <div

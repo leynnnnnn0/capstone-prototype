@@ -174,7 +174,14 @@ export function useWebXR() {
     async function loadAndPlace(url, corners) {
         const T = THREERef.current;
         const scene = sceneRef.current;
-        if (!T || !scene) return;
+        window.__dbg = window.__dbg || [];
+        window.__dbg.push(
+            'loadAndPlace: T:' + !!T + ' scene:' + !!scene + ' url:' + url,
+        );
+        if (!T || !scene) {
+            window.__dbg.push('ABORT no T or scene');
+            return;
+        }
 
         setModelLoading(true);
         setModelError(null);
@@ -251,13 +258,37 @@ export function useWebXR() {
     // ── swapModel ─────────────────────────────────────────────────────────────
     // Public function — swap to a different model keeping same corners.
     const swapModel = useCallback(async (newUrl) => {
-        if (isBusyRef.current) return;
+        window.__dbg = window.__dbg || [];
+        window.__dbg.push('swapModel called: ' + newUrl);
+        window.__dbg.push(
+            'busy:' +
+                isBusyRef.current +
+                ' corners:' +
+                !!savedCornersRef.current +
+                ' THREE:' +
+                !!THREERef.current,
+        );
+
+        if (isBusyRef.current) {
+            window.__dbg.push('BLOCKED by busy');
+            return;
+        }
         const corners = savedCornersRef.current;
-        if (!corners) return;
+        if (!corners) {
+            window.__dbg.push('BLOCKED no corners');
+            return;
+        }
 
         isBusyRef.current = true;
+        window.__dbg.push('removing old model...');
         removeActiveModel();
-        await loadAndPlace(newUrl, corners);
+        window.__dbg.push('loading: ' + newUrl);
+        try {
+            await loadAndPlace(newUrl, corners);
+            window.__dbg.push('loadAndPlace done');
+        } catch (e) {
+            window.__dbg.push('loadAndPlace ERROR: ' + e.message);
+        }
         isBusyRef.current = false;
     }, []);
 
