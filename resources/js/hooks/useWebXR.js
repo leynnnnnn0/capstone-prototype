@@ -31,6 +31,7 @@ export function useWebXR() {
     const windowModelRef = useRef(null);
     const originalTransformRef = useRef(null);
     const lastCornersRef = useRef(null); // saved after every measurement for model swapping
+    const THREERef = useRef(null); // stored from startAR so swapModel can reuse it
     const selectedModelUrlRef = useRef('/models/window.glb'); // default model
 
     const [isSupported, setIsSupported] = useState(null);
@@ -296,6 +297,7 @@ export function useWebXR() {
                 prevHitRef.current = null;
 
                 const THREE = await import('three');
+                THREERef.current = THREE; // store for swapModel to reuse
 
                 const renderer = new THREE.WebGLRenderer({
                     canvas: canvasEl,
@@ -476,6 +478,7 @@ export function useWebXR() {
         }
         window.__arModel = null;
         window.__arCamera = null;
+        lastCornersRef.current = null;
         anchorsRef.current = [];
         dotMeshesRef.current.forEach((m) => sceneRef.current?.remove(m));
         lineMeshesRef.current.forEach((l) => sceneRef.current?.remove(l));
@@ -507,21 +510,36 @@ export function useWebXR() {
 
     // ── swapModel ─────────────────────────────────────────────────────────────
     // Removes the current model and loads a new one at the SAME measured corners.
-    // The user keeps their measurement — no re-tapping needed.
+    // Uses THREERef — the same THREE instance from startAR — to avoid
+    // instanceof mismatches that happen when you re-import the module.
     const swapModel = useCallback(async (newModelUrl) => {
+        const THREE = THREERef.current;
         const scene = sceneRef.current;
         const corners = lastCornersRef.current;
-        if (!scene || !corners) return; // no measurement yet
 
-        // remove old model
+        if (!THREE || !scene || !corners) {
+            console.warn('[swapModel] not ready — THREE/scene/corners missing');
+            return;
+        }
+
+        // remove old model from scene and free its GPU memory
         if (windowModelRef.current) {
             scene.remove(windowModelRef.current);
+            windowModelRef.current.traverse((child) => {
+                if (child.isMesh) {
+                    child.geometry?.dispose();
+                    if (Array.isArray(child.material)) {
+                        child.material.forEach((m) => m.dispose());
+                    } else {
+                        child.material?.dispose();
+                    }
+                }
+            });
             windowModelRef.current = null;
             window.__arModel = null;
         }
 
-        // load the new model at the same corners
-        const THREE = await import('three');
+        // load and place the new model at the same corners
         await loadWindowModel(THREE, scene, corners, newModelUrl);
     }, []);
 
