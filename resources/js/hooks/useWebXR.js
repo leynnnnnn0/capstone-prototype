@@ -207,7 +207,10 @@ export function useWebXR() {
     }
 
     async function loadWindowModel(THREE, scene, corners, modelUrl) {
-        if (!scene || !modelUrl) return;
+        if (!scene || !modelUrl) {
+            setModelError('Load aborted: no scene or url');
+            return;
+        }
         setModelLoading(true);
         setModelError(null);
         try {
@@ -227,7 +230,10 @@ export function useWebXR() {
             placeModel(THREE, model, corners);
 
             // guard: if the session ended while we were loading, don't add
-            if (sceneRef.current !== scene) return;
+            if (sceneRef.current !== scene) {
+                setModelError('Scene changed during load');
+                return;
+            }
 
             scene.add(model);
             windowModelRef.current = model;
@@ -517,41 +523,65 @@ export function useWebXR() {
     }, []);
 
     // ── swapModel ─────────────────────────────────────────────────────────────
-    // Removes the current model and loads a new one at the SAME measured corners.
-    // Uses THREERef — the same THREE instance from startAR — to avoid
-    // instanceof mismatches that happen when you re-import the module.
     const swapModel = useCallback(async (newModelUrl) => {
+        // snapshot everything we need RIGHT NOW before any async
         const THREE = THREERef.current;
         const scene = sceneRef.current;
         const corners = lastCornersRef.current;
 
-        if (!THREE || !scene || !corners) {
-            console.warn('[swapModel] not ready — THREE/scene/corners missing');
-            return;
-        }
-
+        if (!THREE || !scene || !corners) return;
+        if (isSwappingRef.current) return;
         isSwappingRef.current = true;
 
-        // remove old model from scene and free its GPU memory
-        if (windowModelRef.current) {
-            scene.remove(windowModelRef.current);
-            windowModelRef.current.traverse((child) => {
-                if (child.isMesh) {
-                    child.geometry?.dispose();
-                    if (Array.isArray(child.material)) {
-                        child.material.forEach((m) => m.dispose());
-                    } else {
-                        child.material?.dispose();
-                    }
+        // step 1: remove old model synchronously
+        const old = windowModelRef.current;
+        if (old) {
+            scene.remove(old);
+            old.traverse((c) => {
+                if (c.isMesh) {
+                    c.geometry?.dispose();
+                    Array.isArray(c.material)
+                        ? c.material.forEach((m) => m.dispose())
+                        : c.material?.dispose();
                 }
             });
             windowModelRef.current = null;
             window.__arModel = null;
         }
 
-        // load and place the new model at the same corners
+        // step 2: load new model
+        setModelLoading(true);
+        setModelError(null);
         try {
-            await loadWindowModel(THREE, scene, corners, newModelUrl);
+            const { GLTFLoader } =
+                await import('three/examples/jsm/loaders/GLTFLoader.js');
+            const gltf = await new Promise((res, rej) =>
+                new GLTFLoader().load(newModelUrl, res, undefined, rej),
+            );
+            const model = gltf.scene;
+            model.traverse((c) => {
+                if (c.isMesh) {
+                    c.castShadow = true;
+                    c.receiveShadow = true;
+                }
+            });
+
+            placeModel(THREE, model, corners);
+            scene.add(model);
+
+            windowModelRef.current = model;
+            window.__arModel = model;
+            originalTransformRef.current = {
+                position: model.position.clone(),
+                rotation: model.rotation.clone(),
+                scale: model.scale.clone(),
+            };
+            // keep lastCornersRef intact for next swap
+            setModelLoading(false);
+            setModelPlaced(true);
+        } catch (err) {
+            setModelError('Failed to load: ' + (err.message || newModelUrl));
+            setModelLoading(false);
         } finally {
             isSwappingRef.current = false;
         }
