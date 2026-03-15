@@ -264,8 +264,11 @@ export function useWebXRFree() {
 
         const pos = latestHitRef.current;
         const anchors = anchorsRef.current;
-        anchors.push({ x: pos.x, y: pos.y, z: pos.z });
 
+        // guard: don't add more taps than required
+        if (anchors.length >= requiredTapsRef.current) return;
+
+        anchors.push({ x: pos.x, y: pos.y, z: pos.z });
         addDot(THREE, pos, anchors.length - 1);
 
         // draw line from previous point to this one
@@ -276,20 +279,16 @@ export function useWebXRFree() {
                 anchors[anchors.length - 1],
             );
         }
-        // draw closing line preview if >= 3 points
-        if (anchors.length >= 3) {
-            // remove old closing line (last in lineMeshesRef) and redraw
-            const last =
-                lineMeshesRef.current[lineMeshesRef.current.length - 1];
-            // check if it was a closing line by color — simpler: always redraw
-            redrawLines(THREE);
-        }
 
         const newCount = anchors.length;
         setTapCount(newCount);
-        // auto-confirm when required taps reached
+
+        // auto-confirm: inline the logic here so THREE is the correct reference
+        // (calling confirmMeasurement via useCallback would use a stale closure)
         if (newCount === requiredTapsRef.current) {
-            confirmMeasurement(THREE);
+            const dims = calcDimensionsFromPoints(THREE, anchors);
+            setDimensions({ widthCm: dims.widthCm, heightCm: dims.heightCm });
+            loadModel(THREE, sceneRef.current, dims);
         } else {
             setCanConfirm(newCount >= DEFAULT_MIN_TAPS);
         }

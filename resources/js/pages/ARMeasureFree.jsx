@@ -56,13 +56,13 @@ const MODELS = [
         shape: 'l-shape',
         corners: [
             'Top-left',
-            'Top-middle',
-            'Inner corner',
+            'Top-center',
             'Top-right',
             'Bottom-right',
+            'Bottom-center',
             'Bottom-left',
         ],
-        shapeDesc: 'L-shape — 6 corners',
+        shapeDesc: 'L-shape — 3 on top, 3 on bottom',
     },
     {
         id: 'cabinet2',
@@ -73,13 +73,13 @@ const MODELS = [
         shape: 'l-shape',
         corners: [
             'Top-left',
-            'Top-middle',
-            'Inner corner',
+            'Top-center',
             'Top-right',
             'Bottom-right',
+            'Bottom-center',
             'Bottom-left',
         ],
-        shapeDesc: 'L-shape — 6 corners',
+        shapeDesc: 'L-shape — 3 on top, 3 on bottom',
     },
     {
         id: 'cabinet3',
@@ -90,13 +90,13 @@ const MODELS = [
         shape: 'l-shape',
         corners: [
             'Top-left',
-            'Top-middle',
-            'Inner corner',
+            'Top-center',
             'Top-right',
             'Bottom-right',
+            'Bottom-center',
             'Bottom-left',
         ],
-        shapeDesc: 'L-shape — 6 corners',
+        shapeDesc: 'L-shape — 3 on top, 3 on bottom',
     },
 ];
 
@@ -204,31 +204,75 @@ function ShapeDiagram({ shape, taps }) {
         );
     }
     if (shape === 'l-shape') {
-        // L-shape: full-width top, then drops down on the right
+        // L-shape: 3 points across the top, 3 across the bottom
+        // Top-left(1) → Top-center(2) → Top-right(3)
+        // Bottom-right(4) → Bottom-center(5) → Bottom-left(6)
+        // The inner corner is defined by where top-center and bottom-center align
         return (
-            <svg viewBox="0 0 220 160" style={{ width: '100%', maxWidth: 240 }}>
+            <svg viewBox="0 0 240 170" style={{ width: '100%', maxWidth: 260 }}>
+                {/* L-shape outline — full width top, step-down on right */}
                 <polyline
-                    points="20,20 130,20 130,80 200,80 200,140 20,140 20,20"
-                    fill="none"
+                    points="20,30 120,30 120,90 220,90 220,145 20,145 20,30"
+                    fill="rgba(0,255,136,0.04)"
                     stroke="rgba(0,255,136,0.4)"
                     strokeWidth="1.5"
                     strokeDasharray="6,3"
                 />
+                {/* dashed inner step guides */}
+                <line
+                    x1="120"
+                    y1="30"
+                    x2="120"
+                    y2="90"
+                    stroke="rgba(255,255,255,0.1)"
+                    strokeWidth="1"
+                    strokeDasharray="3,3"
+                />
+                <line
+                    x1="20"
+                    y1="90"
+                    x2="220"
+                    y2="90"
+                    stroke="rgba(255,255,255,0.1)"
+                    strokeWidth="1"
+                    strokeDasharray="3,3"
+                />
+                {/* top row labels */}
+                <text
+                    x="70"
+                    y="18"
+                    textAnchor="middle"
+                    fontSize="9"
+                    fill="rgba(255,255,255,0.3)"
+                >
+                    top row
+                </text>
+                {/* bottom row labels */}
+                <text
+                    x="120"
+                    y="162"
+                    textAnchor="middle"
+                    fontSize="9"
+                    fill="rgba(255,255,255,0.3)"
+                >
+                    bottom row
+                </text>
+                {/* tap dots — top row: 1,2,3  bottom row: 4,5,6 */}
                 {[
-                    ['1', 20, 20],
-                    ['2', 130, 20],
-                    ['3', 130, 80],
-                    ['4', 200, 80],
-                    ['5', 200, 140],
-                    ['6', 20, 140],
-                ].map(([n, cx, cy]) => (
+                    ['1', 20, 30, 'TL'],
+                    ['2', 120, 30, 'TC'],
+                    ['3', 220, 90, 'TR'],
+                    ['4', 220, 145, 'BR'],
+                    ['5', 120, 145, 'BC'],
+                    ['6', 20, 145, 'BL'],
+                ].map(([n, cx, cy, lbl]) => (
                     <g key={n}>
                         <circle
                             cx={cx}
                             cy={cy}
-                            r="10"
+                            r="11"
                             fill="#00ff88"
-                            opacity="0.9"
+                            opacity="0.92"
                         />
                         <text
                             x={cx}
@@ -243,15 +287,6 @@ function ShapeDiagram({ shape, taps }) {
                         </text>
                     </g>
                 ))}
-                <text
-                    x="80"
-                    y="95"
-                    textAnchor="middle"
-                    fontSize="11"
-                    fill="rgba(255,255,255,0.35)"
-                >
-                    6 corners
-                </text>
             </svg>
         );
     }
