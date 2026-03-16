@@ -1,5 +1,13 @@
 import { useState, useEffect } from 'react';
-
+import SHOWER_ENCLOSURE from "../../images/show_enclosure.jpeg";
+import SHOP_FRONTS from '../../images/shop_fronts.jpg';
+import SCREEN_DOOR from '../../images/screen_door.jpeg';
+import HINGED_DOOR from '../../images/hinged_door.jpg';
+import GLASS_DOOR from '../../images/glass_door.jpg';
+import FRAMELESS_SHOWER from '../../images/frameless_shower.jpeg';
+import FIXED_PANELS from '../../images/fixed_panels.jpeg';
+import ALUMINUM_WINDOWS from '../../images/aluminum_window.jpg';
+import ACP_CABINET from '../../images/acp_cabinets.jpeg';
 // ── Data ──────────────────────────────────────────────────────────────────────
 const DOOR_PRODUCTS = [
     {
@@ -7,35 +15,35 @@ const DOOR_PRODUCTS = [
         name: 'Screen Door',
         category: 'Aluminum Doors',
         desc: 'Heavy-duty aluminum mesh frames built for ventilation and security in any opening.',
-        img: 'https://images.unsplash.com/photo-1558618666-fcd25c85cd64?w=600&q=80',
+        img: SCREEN_DOOR
     },
     {
         id: 2,
         name: 'Glass Door',
         category: 'Aluminum Doors',
         desc: 'Tempered clear or frosted glass panels set in precision-machined aluminum profiles.',
-        img: 'https://images.unsplash.com/photo-1497366216548-37526070297c?w=600&q=80',
+        img: GLASS_DOOR
     },
     {
         id: 3,
         name: 'Sliding & Hinged Door',
         category: 'Aluminum Doors',
         desc: 'Space-saving sliding tracks and classic hinged configurations — made to measure.',
-        img: 'https://images.unsplash.com/photo-1545324418-cc1a3fa10c00?w=600&q=80',
+        img: HINGED_DOOR
     },
     {
         id: 4,
         name: 'Shop Fronts',
         category: 'Aluminum Doors',
         desc: 'Commercial aluminum shop fronts engineered for high-traffic retail environments.',
-        img: 'https://images.unsplash.com/photo-1486325212027-8081e485255e?w=600&q=80',
+        img: SHOP_FRONTS
     },
     {
         id: 5,
         name: 'ACP Cabinets',
         category: 'Aluminum Doors',
         desc: 'Aluminum composite panel cabinets — lightweight, weather-resistant, and modern.',
-        img: 'https://images.unsplash.com/photo-1556909114-f6e7ad7d3136?w=600&q=80',
+        img: ACP_CABINET
     },
 ];
 const WINDOW_PRODUCTS = [
@@ -44,28 +52,28 @@ const WINDOW_PRODUCTS = [
         name: 'Aluminum Windows',
         category: 'Windows & Shower',
         desc: 'Casement, awning, louvre, and fixed types — all precision-engineered to order.',
-        img: 'https://images.unsplash.com/photo-1600585154340-be6161a56a0c?w=600&q=80',
+        img: ALUMINUM_WINDOWS
     },
     {
         id: 7,
         name: 'Shower Enclosure',
         category: 'Windows & Shower',
         desc: 'Full-frame enclosures with polished aluminum profiles and certified safety glass.',
-        img: 'https://images.unsplash.com/photo-1552321554-5fefe8c9ef14?w=600&q=80',
+        img: SHOWER_ENCLOSURE
     },
     {
         id: 8,
         name: 'Frameless Shower',
         category: 'Windows & Shower',
         desc: 'Minimalist hardware-concealed panels delivering a spa-grade aesthetic.',
-        img: 'https://images.unsplash.com/photo-1620626011761-996317702782?w=600&q=80',
+        img: FRAMELESS_SHOWER
     },
     {
         id: 9,
         name: 'Fixed Panel',
         category: 'Windows & Shower',
         desc: 'Structural fixed glass for balustrades, partitions, and architectural facades.',
-        img: 'https://images.unsplash.com/photo-1600566753190-17f0baa2a6c3?w=600&q=80',
+        img: FIXED_PANELS
     },
 ];
 const ALL_PRODUCTS = [...DOOR_PRODUCTS, ...WINDOW_PRODUCTS];
@@ -260,13 +268,12 @@ function Hero() {
                     </p>
                     <h1
                         className="mb-6 text-5xl leading-[1.08] font-black text-gray-900 lg:text-6xl"
-                        style={{ fontFamily: "'Playfair Display', serif" }}
                     >
                         Building with
                         <br />
                         Purpose and
                         <br />
-                        <span className="text-blue-600 italic">Awareness</span>
+                        <span className="text-blue-600 ">Awareness</span>
                     </h1>
                     <p className="mb-8 max-w-md text-base leading-relaxed text-gray-500">
                         At GlassViz, we combine craftsmanship and precision to
@@ -396,7 +403,6 @@ function About() {
                     </p>
                     <h2
                         className="mb-4 text-4xl font-black text-gray-900"
-                        style={{ fontFamily: "'Playfair Display', serif" }}
                     >
                         Built for the Future
                     </h2>
@@ -464,7 +470,6 @@ function Services() {
                         </p>
                         <h2
                             className="text-4xl font-black text-gray-900"
-                            style={{ fontFamily: "'Playfair Display', serif" }}
                         >
                             Our Products
                         </h2>
@@ -508,9 +513,6 @@ function Services() {
                             </span>
                             <h3
                                 className="mb-2 text-2xl font-black text-white"
-                                style={{
-                                    fontFamily: "'Playfair Display', serif",
-                                }}
                             >
                                 {ALL_PRODUCTS[active].name}
                             </h3>
@@ -622,7 +624,6 @@ function ProjectsSection() {
                         </p>
                         <h2
                             className="text-4xl font-black text-gray-900"
-                            style={{ fontFamily: "'Playfair Display', serif" }}
                         >
                             Our Projects
                         </h2>
@@ -713,7 +714,6 @@ function WhySection() {
                     </p>
                     <h2
                         className="mb-4 text-4xl font-black text-gray-900"
-                        style={{ fontFamily: "'Playfair Display', serif" }}
                     >
                         Why Choose
                         <br />
@@ -806,7 +806,6 @@ function ProcessSection() {
                     </p>
                     <h2
                         className="mb-5 text-4xl leading-tight font-black text-white"
-                        style={{ fontFamily: "'Playfair Display', serif" }}
                     >
                         Our Process to Bring
                         <br />
@@ -903,7 +902,6 @@ function AppointmentSection() {
                     </p>
                     <h2
                         className="mb-5 text-4xl font-black text-gray-900"
-                        style={{ fontFamily: "'Playfair Display', serif" }}
                     >
                         Free On-Site
                         <br />
