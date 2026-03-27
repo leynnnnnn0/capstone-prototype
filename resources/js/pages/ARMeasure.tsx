@@ -58,7 +58,7 @@ export default function ARMeasure() {
 
         async function startAR() {
             const session = await navigator.xr!.requestSession('immersive-ar', {
-                requiredFeatures: ['plane-detection'],
+                requiredFeatures: ['hit-test'],
             });
 
             renderer.xr.setSession(session);
