@@ -7,7 +7,6 @@ type ARState = 'checking' | 'supported' | 'unsupported' | 'active' | 'error';
 export default function ARMeasure() {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
-    const ringRef = useRef<HTMLDivElement>(null);
     const [arState, setArState] = useState<ARState>('checking');
     const [errorMsg, setErrorMsg] = useState('');
 
@@ -57,21 +56,64 @@ export default function ARMeasure() {
         if (!navigator.xr || !rendererRef.current) return;
         const renderer = rendererRef.current;
 
-        const scene = new THREE.Scene();
-        const camera = new THREE.PerspectiveCamera(
+        // ------------------------------------------------------------------
+        // We need TWO scenes:
+        //
+        // 1. mainScene  — where AR panels are placed in world space
+        // 2. hudScene   — rendered AFTER mainScene on top of everything,
+        //                 using an orthographic camera so objects are in
+        //                 screen space (pixels). The reticle lives here.
+        //                 It never moves — always dead center.
+        // ------------------------------------------------------------------
+
+        const mainScene = new THREE.Scene();
+        const mainCamera = new THREE.PerspectiveCamera(
             70,
             window.innerWidth / window.innerHeight,
             0.01,
             20,
         );
-        scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+        mainScene.add(new THREE.AmbientLight(0xffffff, 0.7));
         const dir = new THREE.DirectionalLight(0xffffff, 0.8);
         dir.position.set(1, 2, 1);
-        scene.add(dir);
+        mainScene.add(dir);
 
-        // Stores the last valid hit pose so onSelect knows where to place the panel
+        // HUD scene — orthographic camera covering the full screen in pixels
+        const hudScene = new THREE.Scene();
+        const hw = window.innerWidth / 2;
+        const hh = window.innerHeight / 2;
+        const hudCamera = new THREE.OrthographicCamera(-hw, hw, hh, -hh, 0, 10);
+        hudCamera.position.z = 1;
+
+        // ------------------------------------------------------------------
+        // RETICLE — a ring drawn in HUD (screen) space.
+        // Position is (0, 0) in the ortho camera = exact center of screen.
+        // Color switches based on hit-test result.
+        // ------------------------------------------------------------------
+        const RING_RADIUS = 28; // pixels
+        const RING_TUBE = 3; // pixels
+
+        const reticleMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+        const reticleMesh = new THREE.Mesh(
+            new THREE.TorusGeometry(RING_RADIUS, RING_TUBE, 16, 64),
+            reticleMat,
+        );
+        // x=0, y=0 in ortho space = center of screen
+        reticleMesh.position.set(0, 0, 0);
+        hudScene.add(reticleMesh);
+
+        // Center dot
+        const dotMesh = new THREE.Mesh(
+            new THREE.CircleGeometry(4, 16),
+            new THREE.MeshBasicMaterial({ color: 0xffffff }),
+        );
+        dotMesh.position.set(0, 0, 0);
+        hudScene.add(dotMesh);
+
+        // ------------------------------------------------------------------
+        // Wall panels placed in main scene
+        // ------------------------------------------------------------------
         let lastHitMatrix: THREE.Matrix4 | null = null;
-
         const wallObjects: THREE.Group[] = [];
 
         function createPanel(): THREE.Group {
@@ -108,11 +150,11 @@ export default function ARMeasure() {
             lastHitMatrix.decompose(pos, quat, new THREE.Vector3());
             panel.position.copy(pos);
             panel.quaternion.copy(quat);
-            scene.add(panel);
+            mainScene.add(panel);
             wallObjects.push(panel);
             if (wallObjects.length > MAX_WALL_OBJECTS) {
                 const old = wallObjects.shift()!;
-                scene.remove(old);
+                mainScene.remove(old);
                 old.traverse((c) => {
                     if (c instanceof THREE.Mesh) {
                         c.geometry.dispose();
@@ -155,22 +197,26 @@ export default function ARMeasure() {
                     lastHitMatrix = new THREE.Matrix4().fromArray(
                         hit.transform.matrix,
                     );
-                    // Wall detected — ring turns cyan
-                    if (ringRef.current) {
-                        ringRef.current.style.borderColor = '#00ffff';
-                        ringRef.current.style.boxShadow = '0 0 12px #00ffff';
-                    }
+                    // Cyan = surface detected
+                    reticleMat.color.setHex(0x00ffff);
+                    (dotMesh.material as THREE.MeshBasicMaterial).color.setHex(
+                        0x00ffff,
+                    );
                 } else {
                     lastHitMatrix = null;
-                    // No surface — ring stays white
-                    if (ringRef.current) {
-                        ringRef.current.style.borderColor =
-                            'rgba(255,255,255,0.6)';
-                        ringRef.current.style.boxShadow = 'none';
-                    }
+                    // White = no surface
+                    reticleMat.color.setHex(0xffffff);
+                    (dotMesh.material as THREE.MeshBasicMaterial).color.setHex(
+                        0xffffff,
+                    );
                 }
 
-                renderer.render(scene, camera);
+                // Render main AR scene first, then HUD on top
+                renderer.autoClear = false;
+                renderer.clear();
+                renderer.render(mainScene, mainCamera);
+                renderer.clearDepth(); // clear depth so HUD always draws on top
+                renderer.render(hudScene, hudCamera);
             });
 
             session.addEventListener('end', () => {
@@ -191,35 +237,12 @@ export default function ARMeasure() {
                 width: '100vw',
                 height: '100vh',
                 background: '#000',
-                overflow: 'hidden',
             }}
         >
             <canvas
                 ref={canvasRef}
                 style={{ display: 'block', width: '100%', height: '100%' }}
             />
-
-            {/* THE RING — fixed to screen center using position absolute + fixed pixel offset */}
-            {arState === 'active' && (
-                <div
-                    ref={ringRef}
-                    style={{
-                        position:
-                            'fixed' /* fixed to the VIEWPORT, not the canvas */,
-                        top: '50%',
-                        left: '50%',
-                        width: 48,
-                        height: 48,
-                        marginTop: -24,
-                        marginLeft: -24,
-                        borderRadius: '50%',
-                        border: '2.5px solid rgba(255,255,255,0.6)',
-                        boxShadow: 'none',
-                        pointerEvents: 'none',
-                        zIndex: 9999 /* always on top of everything */,
-                    }}
-                />
-            )}
 
             {arState === 'checking' && (
                 <Overlay>
