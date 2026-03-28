@@ -1,121 +1,99 @@
 /**
  * WallHitTest.tsx
  *
- * A React + Three.js WebXR component that detects vertical surfaces (walls)
- * using the WebXR Hit Test API, then places a virtual object on the wall
- * when the user taps (selects).
- *
- * Key differences from the original floor-based hit test:
- *  - Uses XRPlane orientation filtering ("vertical") to target walls
- *  - Placed object is a flat panel (picture frame) that faces out from the wall
- *  - Three.js replaces the custom WebGL renderer from the original example
+ * A React + Three.js WebXR AR component that:
+ *  1. Checks if the device supports immersive-ar
+ *  2. Shows a "Start AR" button (required — browsers need a user gesture)
+ *  3. On tap, enters AR and casts hit tests against VERTICAL surfaces (walls)
+ *  4. Shows a reticle ring on the detected wall
+ *  5. On screen tap, places a flat panel object on the wall
  */
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 
 // ---------------------------------------------------------------------------
-// Type augmentation — the standard @types/webxr typings are sometimes
-// incomplete. We extend the global interfaces we need here.
-// ---------------------------------------------------------------------------
-
-declare global {
-    interface XRSessionInit {
-        requiredFeatures?: string[];
-        optionalFeatures?: string[];
-    }
-    interface XRSession {
-        requestHitTestSource(options: {
-            space: XRSpace;
-            entityTypes?: string[];
-        }): Promise<XRHitTestSource>;
-        requestAnimationFrame(callback: XRFrameRequestCallback): number;
-        updateRenderState(state: { baseLayer?: XRWebGLLayer }): void;
-        requestReferenceSpace(
-            type: XRReferenceSpaceType,
-        ): Promise<XRReferenceSpace>;
-        addEventListener(
-            type: string,
-            listener: EventListenerOrEventListenerObject,
-        ): void;
-        end(): Promise<void>;
-    }
-    interface XRFrame {
-        getViewerPose(referenceSpace: XRReferenceSpace): XRViewerPose | null;
-        getHitTestResults(source: XRHitTestSource): XRHitTestResult[];
-        session: XRSession;
-    }
-    interface XRHitTestResult {
-        getPose(baseSpace: XRReferenceSpace): XRPose | null;
-    }
-    interface XRHitTestSource {
-        cancel(): void;
-    }
-    interface XRViewerPose {
-        views: XRView[];
-    }
-    interface XRView {
-        eye: 'left' | 'right' | 'none';
-        projectionMatrix: Float32Array;
-        transform: XRRigidTransform;
-        recommendedViewportScale?: number;
-    }
-    interface XRWebGLLayer {
-        framebuffer: WebGLFramebuffer;
-        getViewport(view: XRView): XRViewport | null;
-    }
-    interface XRViewport {
-        x: number;
-        y: number;
-        width: number;
-        height: number;
-    }
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const XRWebGLLayer: any;
-}
-
-// ---------------------------------------------------------------------------
-// Max number of wall objects allowed in the scene at once.
-// Oldest objects are removed when the limit is exceeded.
+// How many wall panels are allowed before the oldest one is removed
 // ---------------------------------------------------------------------------
 const MAX_WALL_OBJECTS = 15;
 
-export default function ARMeasure() {
-    // Ref to the <canvas> element that Three.js renders into
-    const canvasRef = useRef<HTMLCanvasElement>(null);
+// ---------------------------------------------------------------------------
+// Component state machine
+//   "checking"    → detecting browser support
+//   "supported"   → ready, showing Start AR button
+//   "unsupported" → device/browser can't do immersive-ar
+//   "active"      → inside the AR session
+//   "error"       → session failed to start
+// ---------------------------------------------------------------------------
+type ARState = 'checking' | 'supported' | 'unsupported' | 'active' | 'error';
 
+export default function ARMeasure() {
+    const canvasRef = useRef<HTMLCanvasElement>(null);
+    const [arState, setArState] = useState<ARState>('checking');
+    const [errorMsg, setErrorMsg] = useState('');
+
+    // Keep Three.js renderer in a ref so startAR can access it
+    const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
+
+    // -------------------------------------------------------------------------
+    // On mount: check if immersive-ar is supported and update state
+    // -------------------------------------------------------------------------
     useEffect(() => {
-        // -----------------------------------------------------------------------
-        // Guard: exit early if the browser does not support WebXR at all
-        // -----------------------------------------------------------------------
         if (!navigator.xr) {
-            console.warn('WebXR not supported in this browser.');
+            setArState('unsupported');
             return;
         }
+        navigator.xr
+            .isSessionSupported('immersive-ar')
+            .then((supported) => {
+                setArState(supported ? 'supported' : 'unsupported');
+            })
+            .catch(() => setArState('unsupported'));
+    }, []);
 
-        const canvas = canvasRef.current!;
+    // -------------------------------------------------------------------------
+    // Initialize Three.js renderer once (after canvas is in the DOM)
+    // -------------------------------------------------------------------------
+    useEffect(() => {
+        const canvas = canvasRef.current;
+        if (!canvas) return;
 
-        // -----------------------------------------------------------------------
-        // THREE.js RENDERER SETUP
-        // We use WebGLRenderer with xrCompatible:true so it can share the GL
-        // context with the WebXR session. alpha:true keeps the background
-        // transparent so the real-world camera feed shows through in AR.
-        // -----------------------------------------------------------------------
+        // Build renderer once and store in ref
         const renderer = new THREE.WebGLRenderer({
             canvas,
-            alpha: true, // transparent background → shows camera feed
+            alpha: true, // transparent background so camera feed shows through
             antialias: true,
         });
         renderer.setPixelRatio(window.devicePixelRatio);
         renderer.setSize(window.innerWidth, window.innerHeight);
-        renderer.xr.enabled = true; // MUST be true to enter an XR session
+        renderer.xr.enabled = true; // mandatory for WebXR sessions
 
-        // -----------------------------------------------------------------------
-        // SCENE + CAMERA
-        // PerspectiveCamera values don't matter much in XR because the headset /
-        // phone overrides them, but Three.js still requires a camera object.
-        // -----------------------------------------------------------------------
+        rendererRef.current = renderer;
+
+        const onResize = () => {
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        };
+        window.addEventListener('resize', onResize);
+
+        return () => {
+            window.removeEventListener('resize', onResize);
+            renderer.dispose();
+        };
+    }, []);
+
+    // -------------------------------------------------------------------------
+    // startAR — called when the user taps "Start AR"
+    // Must be triggered by a user gesture (tap/click) or browsers will block it
+    // -------------------------------------------------------------------------
+    async function startAR() {
+        if (!navigator.xr || !rendererRef.current) return;
+
+        const renderer = rendererRef.current;
+
+        // Build the Three.js scene
         const scene = new THREE.Scene();
+
+        // Camera — values are overridden by the XR headset/phone, but Three.js needs one
         const camera = new THREE.PerspectiveCamera(
             70,
             window.innerWidth / window.innerHeight,
@@ -123,263 +101,176 @@ export default function ARMeasure() {
             20,
         );
 
-        // -----------------------------------------------------------------------
-        // AMBIENT + DIRECTIONAL LIGHT
-        // Provides basic shading so the placed objects look grounded.
-        // -----------------------------------------------------------------------
+        // Basic lighting so placed objects have shading
         scene.add(new THREE.AmbientLight(0xffffff, 0.6));
         const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
         dirLight.position.set(1, 2, 1);
         scene.add(dirLight);
 
         // -----------------------------------------------------------------------
-        // RETICLE — the targeting indicator shown on the wall surface
-        //
-        // We use a thin torus (ring) that lies flat on the wall. Its orientation
-        // will be updated every frame to match the detected wall surface normal.
+        // RETICLE — cyan ring shown on the detected wall surface
+        // Rotated 90° on X so it lies flat against the wall (faces outward)
         // -----------------------------------------------------------------------
-        const reticleGeometry = new THREE.TorusGeometry(0.08, 0.012, 8, 24);
-        const reticleMaterial = new THREE.MeshBasicMaterial({
-            color: 0x00ffff,
-        });
-        const reticle = new THREE.Mesh(reticleGeometry, reticleMaterial);
-        reticle.visible = false; // hidden until a wall surface is detected
-        // Rotate reticle so it lies in the XZ plane (facing out of the wall)
+        const reticle = new THREE.Mesh(
+            new THREE.TorusGeometry(0.08, 0.012, 8, 24),
+            new THREE.MeshBasicMaterial({ color: 0x00ffff }),
+        );
         reticle.rotation.x = Math.PI / 2;
+        reticle.visible = false; // hidden until a wall is detected
         scene.add(reticle);
 
+        // Placed panel objects and their count
+        const wallObjects: THREE.Group[] = [];
+
         // -----------------------------------------------------------------------
-        // WALL OBJECT FACTORY
-        // Creates a flat rectangular panel (like a framed picture) that will be
-        // placed flush against the detected wall surface.
+        // WALL PANEL FACTORY — creates a flat framed rectangle to stick on walls
         // -----------------------------------------------------------------------
         function createWallPanel(): THREE.Group {
             const group = new THREE.Group();
 
-            // Main panel face — a slightly emissive colored rectangle
-            const faceGeo = new THREE.BoxGeometry(0.25, 0.35, 0.01);
-            const faceMat = new THREE.MeshStandardMaterial({
-                color: 0x4488ff,
-                emissive: 0x112244,
-                roughness: 0.4,
-                metalness: 0.3,
-            });
-            const face = new THREE.Mesh(faceGeo, faceMat);
+            // Colored panel face
+            const face = new THREE.Mesh(
+                new THREE.BoxGeometry(0.25, 0.35, 0.01),
+                new THREE.MeshStandardMaterial({
+                    color: 0x4488ff,
+                    emissive: 0x112244,
+                    roughness: 0.4,
+                    metalness: 0.3,
+                }),
+            );
             group.add(face);
 
-            // Thin border frame around the panel
-            const frameGeo = new THREE.BoxGeometry(0.27, 0.37, 0.008);
-            const frameMat = new THREE.MeshStandardMaterial({
-                color: 0xddaa55,
-                roughness: 0.6,
-                metalness: 0.7,
-            });
-            const frame = new THREE.Mesh(frameGeo, frameMat);
-            frame.position.z = -0.006; // push frame slightly behind the face
+            // Gold border frame slightly behind the face
+            const frame = new THREE.Mesh(
+                new THREE.BoxGeometry(0.27, 0.37, 0.008),
+                new THREE.MeshStandardMaterial({
+                    color: 0xddaa55,
+                    roughness: 0.6,
+                    metalness: 0.7,
+                }),
+            );
+            frame.position.z = -0.006;
             group.add(frame);
 
             return group;
         }
 
-        // Keeps references to placed panels so we can remove the oldest ones
-        const wallObjects: THREE.Group[] = [];
-
         // -----------------------------------------------------------------------
-        // XR SESSION STATE
-        // These are populated once the XR session starts and cleaned up on end.
-        // -----------------------------------------------------------------------
-        let xrRefSpace: XRReferenceSpace | null = null; // 'local' space — world anchor
-        let xrViewerSpace: XRReferenceSpace | null = null; // viewer (device) space — for ray casting
-        let xrHitTestSource: XRHitTestSource | null = null; // produces hit test results each frame
-
-        // -----------------------------------------------------------------------
-        // START AR SESSION
-        //
-        // We request:
-        //   • 'local'     — a stable world reference space
-        //   • 'hit-test'  — permission to cast rays and get surface intersections
-        //
-        // 'plane-detection' is listed as optional; when available it improves
-        // wall detection accuracy on supported devices (e.g. ARCore).
-        // -----------------------------------------------------------------------
-        async function startAR() {
-            try {
-                const session = await navigator.xr!.requestSession(
-                    'immersive-ar',
-                    {
-                        requiredFeatures: ['local', 'hit-test'],
-                        optionalFeatures: ['plane-detection'],
-                    },
-                );
-
-                // Hand the session to Three.js so it manages the render loop
-                renderer.xr.setSession(session as unknown as THREE.XRSession);
-
-                // Listen for the 'select' event (screen tap / controller trigger)
-                // to place an object on the wall
-                session.addEventListener('select', onSelect as EventListener);
-
-                // 'viewer' reference space: origin follows the device itself.
-                // We use this as the origin of our hit-test ray (straight ahead).
-                xrViewerSpace = await session.requestReferenceSpace('viewer');
-
-                // Request a hit test source that:
-                //   • originates from the viewer (device camera direction)
-                //   • targets "plane" entity types with "vertical" orientation → walls
-                xrHitTestSource = await session.requestHitTestSource({
-                    space: xrViewerSpace,
-                    // 'entityTypes' with "plane" + orientation hint focuses on walls.
-                    // Note: full plane-orientation filtering may require plane-detection
-                    // feature; without it the browser still attempts best-effort hits.
-                    entityTypes: ['plane'],
-                });
-
-                // 'local' reference space: a fixed world origin, used to place
-                // objects and to read back hit-test poses in world coordinates.
-                xrRefSpace = await session.requestReferenceSpace('local');
-
-                // Kick off the XR render loop via Three.js
-                renderer.setAnimationLoop(onXRFrame);
-
-                // Clean up everything when the session ends
-                session.addEventListener('end', () => {
-                    xrHitTestSource?.cancel();
-                    xrHitTestSource = null;
-                    xrRefSpace = null;
-                    xrViewerSpace = null;
-                    renderer.setAnimationLoop(null);
-                });
-            } catch (err) {
-                console.error('Failed to start AR session:', err);
-            }
-        }
-
-        // -----------------------------------------------------------------------
-        // SELECT HANDLER (screen tap / controller trigger)
-        //
-        // When the user taps while the reticle is visible, we clone the current
-        // reticle transform and place a new wall panel there.
+        // SELECT HANDLER — fires on screen tap while in AR
+        // Places a wall panel at the reticle's current position/orientation
         // -----------------------------------------------------------------------
         function onSelect() {
             if (!reticle.visible) return;
 
-            // Clone the reticle's world-space position and quaternion
             const panel = createWallPanel();
             panel.position.copy(reticle.position);
             panel.quaternion.copy(reticle.quaternion);
-
-            // The hit-test matrix places the object's +Z axis along the wall normal.
-            // Our panel faces +Z by default (BoxGeometry), so no extra rotation needed.
-
             scene.add(panel);
             wallObjects.push(panel);
 
-            // -----------------------------------------------------------------------
-            // PERFORMANCE GUARD: remove the oldest panel if we exceed the limit.
-            // This keeps the scene from growing unboundedly on a long AR session.
-            // -----------------------------------------------------------------------
+            // Remove + dispose the oldest panel if over the limit
             if (wallObjects.length > MAX_WALL_OBJECTS) {
                 const oldest = wallObjects.shift()!;
                 scene.remove(oldest);
-                // Dispose geometries and materials to free GPU memory
                 oldest.traverse((child) => {
                     if (child instanceof THREE.Mesh) {
                         child.geometry.dispose();
-                        if (Array.isArray(child.material)) {
-                            child.material.forEach((m) => m.dispose());
-                        } else {
-                            child.material.dispose();
-                        }
+                        (Array.isArray(child.material)
+                            ? child.material
+                            : [child.material]
+                        ).forEach((m) => m.dispose());
                     }
                 });
             }
         }
 
-        // -----------------------------------------------------------------------
-        // PER-FRAME XR RENDER CALLBACK
-        //
-        // Three.js calls this every animation frame while the XR session is active.
-        // `timestamp` is the DOMHighResTimeStamp; `frame` is the XRFrame.
-        // -----------------------------------------------------------------------
-        function onXRFrame(_timestamp: number, frame: XRFrame) {
-            if (!frame) return;
+        try {
+            // -----------------------------------------------------------------------
+            // REQUEST THE AR SESSION
+            // 'local'    → stable world-anchored reference space
+            // 'hit-test' → permission to cast rays and detect surfaces
+            // 'plane-detection' is optional; improves wall detection on ARCore/ARKit
+            // -----------------------------------------------------------------------
+            const session = await navigator.xr.requestSession('immersive-ar', {
+                requiredFeatures: ['local', 'hit-test'],
+                optionalFeatures: ['plane-detection'],
+            });
 
-            // Hide the reticle; we'll re-show it only if a hit is found this frame
-            reticle.visible = false;
+            // Hand the session to Three.js so it owns the render loop
+            await renderer.xr.setSession(session as unknown as THREE.XRSession);
 
-            if (xrHitTestSource && xrRefSpace) {
-                // Ask the XR system for all surface intersections this frame
-                const hitTestResults = frame.getHitTestResults(xrHitTestSource);
+            // Listen for taps
+            session.addEventListener('select', onSelect as EventListener);
 
-                if (hitTestResults.length > 0) {
-                    // Use the closest (first) result — the one the device considers best
-                    const hit = hitTestResults[0];
-                    const pose = hit.getPose(xrRefSpace);
+            // -----------------------------------------------------------------------
+            // HIT TEST SOURCE SETUP
+            // 'viewer' space = origin at the device itself, ray pointing forward.
+            // We use this as the source for hit testing (cast from device camera).
+            // 'entityTypes: ["plane"]' focuses hits on detected planes (walls/floors).
+            // -----------------------------------------------------------------------
+            const xrViewerSpace = await session.requestReferenceSpace('viewer');
+            const xrHitTestSource = await session.requestHitTestSource({
+                space: xrViewerSpace,
+                entityTypes: ['plane'],
+            });
 
+            // 'local' space = world anchor, used to read back hit poses
+            const xrRefSpace = await session.requestReferenceSpace('local');
+
+            setArState('active');
+
+            // -----------------------------------------------------------------------
+            // PER-FRAME XR RENDER LOOP
+            // Three.js calls this every frame while the session is running.
+            // -----------------------------------------------------------------------
+            renderer.setAnimationLoop((_timestamp: number, frame: unknown) => {
+                const xrFrame = frame as XRFrame | null;
+                if (!xrFrame) return;
+
+                reticle.visible = false;
+
+                // Get hit test results for this frame
+                const hits = xrFrame.getHitTestResults(xrHitTestSource);
+                if (hits.length > 0) {
+                    const pose = hits[0].getPose(xrRefSpace);
                     if (pose) {
-                        // ---------------------------------------------------------------
-                        // Apply the hit pose to the reticle.
-                        //
-                        // pose.transform.matrix is a column-major Float32Array (16 values)
-                        // representing the surface position AND orientation.
-                        // For a wall, the matrix's +Z column points away from the wall.
-                        //
-                        // THREE.Matrix4.fromArray expects a column-major flat array —
-                        // exactly what WebXR gives us.
-                        // ---------------------------------------------------------------
-                        const hitMatrix = new THREE.Matrix4();
-                        hitMatrix.fromArray(pose.transform.matrix);
-
-                        // Decompose into position + quaternion so we can set them
-                        // independently on the reticle mesh
-                        hitMatrix.decompose(
+                        // Decompose the hit pose matrix into position + quaternion.
+                        // The hit matrix's +Z axis points away from the wall surface.
+                        const m = new THREE.Matrix4().fromArray(
+                            pose.transform.matrix,
+                        );
+                        m.decompose(
                             reticle.position,
                             reticle.quaternion,
-                            new THREE.Vector3(), // scale — we don't use it
+                            new THREE.Vector3(),
                         );
-
-                        // Keep the reticle ring flat against the wall by rotating it
-                        // so it faces out along the wall normal (+Z after decompose)
-                        // We already rotated it 90° on X at creation; the quaternion from
-                        // the hit pose will align it to the wall plane automatically.
                         reticle.visible = true;
                     }
                 }
-            }
 
-            // Render the scene through the XR camera
-            renderer.render(scene, camera);
+                renderer.render(scene, camera);
+            });
+
+            // -----------------------------------------------------------------------
+            // SESSION END — clean up everything
+            // -----------------------------------------------------------------------
+            session.addEventListener('end', () => {
+                xrHitTestSource.cancel();
+                renderer.setAnimationLoop(null);
+                setArState('supported'); // back to ready state
+            });
+        } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : String(err);
+            setErrorMsg(msg);
+            setArState('error');
         }
+    }
 
-        // -----------------------------------------------------------------------
-        // RESPONSIVE RESIZE
-        // Keeps the renderer sized correctly if the viewport changes
-        // (e.g. device orientation change before entering AR).
-        // -----------------------------------------------------------------------
-        function onResize() {
-            renderer.setSize(window.innerWidth, window.innerHeight);
-            camera.aspect = window.innerWidth / window.innerHeight;
-            camera.updateProjectionMatrix();
-        }
-        window.addEventListener('resize', onResize);
-
-        // Start the AR session immediately
-        startAR();
-
-        // -----------------------------------------------------------------------
-        // CLEANUP on React component unmount
-        // -----------------------------------------------------------------------
-        return () => {
-            window.removeEventListener('resize', onResize);
-            renderer.setAnimationLoop(null);
-            renderer.dispose();
-        };
-    }, []);
-
-    // --------------------------------------------------------------------------
-    // RENDER — just a fullscreen canvas. The AR session fills it entirely.
-    // The overlay button and hint text are simple HTML on top.
-    // --------------------------------------------------------------------------
+    // -------------------------------------------------------------------------
+    // RENDER
+    // The canvas is always mounted (Three.js needs it).
+    // UI overlays are conditionally shown on top.
+    // -------------------------------------------------------------------------
     return (
         <div
             style={{
@@ -387,34 +278,140 @@ export default function ARMeasure() {
                 width: '100vw',
                 height: '100vh',
                 background: '#000',
+                overflow: 'hidden',
             }}
         >
-            {/* The canvas Three.js renders into. Must be full-screen for AR. */}
+            {/* Three.js renders here. Always present so the renderer can attach. */}
             <canvas
                 ref={canvasRef}
                 style={{ display: 'block', width: '100%', height: '100%' }}
             />
 
-            {/*
-             * Overlay UI — shown on top of the AR canvas.
-             * In a real app you would also add an "Enter AR" button here
-             * that calls startAR() on press (browsers require a user gesture).
-             */}
-            <div
-                style={{
-                    position: 'absolute',
-                    bottom: 32,
-                    width: '100%',
-                    textAlign: 'center',
-                    color: '#fff',
-                    fontFamily: 'sans-serif',
-                    fontSize: 14,
-                    pointerEvents: 'none',
-                    textShadow: '0 1px 4px rgba(0,0,0,0.8)',
-                }}
-            >
-                Point at a wall · Tap to place a panel
-            </div>
+            {/* ── CHECKING ── */}
+            {arState === 'checking' && (
+                <Overlay>
+                    <p style={styles.hint}>Checking AR support…</p>
+                </Overlay>
+            )}
+
+            {/* ── UNSUPPORTED ── */}
+            {arState === 'unsupported' && (
+                <Overlay>
+                    <p style={styles.title}>AR Not Available</p>
+                    <p style={styles.hint}>
+                        This device or browser does not support WebXR
+                        immersive-ar. Try Chrome on Android with ARCore, or
+                        Safari on iOS 16+.
+                    </p>
+                </Overlay>
+            )}
+
+            {/* ── SUPPORTED — show the Start AR button ── */}
+            {arState === 'supported' && (
+                <Overlay>
+                    <p style={styles.title}>Wall Hit Test</p>
+                    <p style={styles.hint}>
+                        Point your camera at a wall.{'\n'}
+                        Tap Start AR, then tap the screen to place objects.
+                    </p>
+                    {/* onClick is the required user gesture that unlocks XR session creation */}
+                    <button onClick={startAR} style={styles.button}>
+                        Start AR
+                    </button>
+                </Overlay>
+            )}
+
+            {/* ── ACTIVE — minimal hint while in AR ── */}
+            {arState === 'active' && (
+                <div style={styles.activeHint}>
+                    Point at a wall · Tap to place
+                </div>
+            )}
+
+            {/* ── ERROR ── */}
+            {arState === 'error' && (
+                <Overlay>
+                    <p style={styles.title}>Failed to Start AR</p>
+                    <p style={styles.hint}>{errorMsg}</p>
+                    <button
+                        onClick={() => setArState('supported')}
+                        style={styles.button}
+                    >
+                        Try Again
+                    </button>
+                </Overlay>
+            )}
         </div>
     );
 }
+
+// ---------------------------------------------------------------------------
+// Small helper component: full-screen centered overlay
+// ---------------------------------------------------------------------------
+function Overlay({ children }: { children: React.ReactNode }) {
+    return (
+        <div style={styles.overlay}>
+            <div style={styles.card}>{children}</div>
+        </div>
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Inline styles
+// ---------------------------------------------------------------------------
+const styles: Record<string, React.CSSProperties> = {
+    overlay: {
+        position: 'absolute',
+        inset: 0,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: 'rgba(0,0,0,0.55)',
+    },
+    card: {
+        background: 'rgba(10,10,20,0.85)',
+        border: '1px solid rgba(255,255,255,0.15)',
+        borderRadius: 16,
+        padding: '32px 28px',
+        maxWidth: 320,
+        textAlign: 'center',
+        color: '#fff',
+        fontFamily: 'sans-serif',
+        backdropFilter: 'blur(8px)',
+    },
+    title: {
+        fontSize: 22,
+        fontWeight: 700,
+        marginBottom: 12,
+    },
+    hint: {
+        fontSize: 14,
+        color: '#aaa',
+        lineHeight: 1.6,
+        whiteSpace: 'pre-line',
+        marginBottom: 24,
+    },
+    button: {
+        display: 'inline-block',
+        padding: '14px 36px',
+        background: '#00aaff',
+        color: '#fff',
+        border: 'none',
+        borderRadius: 50,
+        fontSize: 16,
+        fontWeight: 600,
+        cursor: 'pointer',
+        letterSpacing: 1,
+    },
+    activeHint: {
+        position: 'absolute',
+        bottom: 40,
+        width: '100%',
+        textAlign: 'center',
+        color: '#fff',
+        fontFamily: 'sans-serif',
+        fontSize: 15,
+        pointerEvents: 'none',
+        textShadow: '0 1px 6px rgba(0,0,0,0.9)',
+    },
+};
