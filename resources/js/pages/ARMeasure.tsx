@@ -2,22 +2,41 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-interface PlacedObject {
-    id: number;
-    matrix: Float32Array;
-    mesh: THREE.Mesh;
-}
-
-// We load Three.js dynamically to avoid SSR issues
 declare global {
     interface Window {
         THREE: typeof import('three');
     }
 }
 
+interface CornerPoint {
+    position: THREE.Vector3;
+    mesh: THREE.Mesh;
+}
+
+interface LabelData {
+    canvas: HTMLCanvasElement;
+    texture: THREE.CanvasTexture;
+    sprite: THREE.Sprite;
+}
+
+interface QuadGroup {
+    id: number;
+    corners: CornerPoint[];
+    faceMesh: THREE.Mesh;
+    edgeLines: THREE.LineSegments;
+    labelData: LabelData[];
+}
+
+interface PendingState {
+    corners: CornerPoint[];
+    previewLines: THREE.LineSegments | null;
+}
+
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const MAX_OBJECTS = 30;
+const CORNER_COLOR = 0x00e5ff;
+const EDGE_COLOR = 0xffffff;
+const QUAD_COLOR = 0x00e5ff;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -35,34 +54,176 @@ function loadScript(src: string): Promise<void> {
     });
 }
 
+function fmtM(m: number): string {
+    return m < 1 ? `${(m * 100).toFixed(1)} cm` : `${m.toFixed(2)} m`;
+}
+
+function roundRect(
+    ctx: CanvasRenderingContext2D,
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    r: number,
+) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    ctx.lineTo(x + r, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+    ctx.lineTo(x, y + r);
+    ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.closePath();
+    ctx.fill();
+}
+
+function makeLabelSprite(
+    THREE: typeof import('three'),
+    text: string,
+): LabelData {
+    const canvas = document.createElement('canvas');
+    canvas.width = 256;
+    canvas.height = 64;
+    const ctx = canvas.getContext('2d')!;
+    ctx.fillStyle = 'rgba(0,0,0,0.75)';
+    roundRect(ctx, 0, 0, 256, 64, 12);
+    ctx.font = 'bold 28px monospace';
+    ctx.fillStyle = '#ffffff';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(text, 128, 32);
+    const texture = new THREE.CanvasTexture(canvas);
+    const mat = new THREE.SpriteMaterial({ map: texture, depthTest: false });
+    const sprite = new THREE.Sprite(mat);
+    sprite.scale.set(0.28, 0.07, 1);
+    return { canvas, texture, sprite };
+}
+
+function buildQuadGeo(
+    THREE: typeof import('three'),
+    pts: THREE.Vector3[],
+): THREE.BufferGeometry {
+    const geo = new THREE.BufferGeometry();
+    const v = new Float32Array([
+        pts[0].x,
+        pts[0].y,
+        pts[0].z,
+        pts[1].x,
+        pts[1].y,
+        pts[1].z,
+        pts[2].x,
+        pts[2].y,
+        pts[2].z,
+        pts[0].x,
+        pts[0].y,
+        pts[0].z,
+        pts[2].x,
+        pts[2].y,
+        pts[2].z,
+        pts[3].x,
+        pts[3].y,
+        pts[3].z,
+    ]);
+    geo.setAttribute('position', new THREE.BufferAttribute(v, 3));
+    return geo;
+}
+
+function buildEdgeGeo(
+    THREE: typeof import('three'),
+    pts: THREE.Vector3[],
+): THREE.BufferGeometry {
+    const geo = new THREE.BufferGeometry();
+    const v = new Float32Array([
+        pts[0].x,
+        pts[0].y,
+        pts[0].z,
+        pts[1].x,
+        pts[1].y,
+        pts[1].z,
+        pts[1].x,
+        pts[1].y,
+        pts[1].z,
+        pts[2].x,
+        pts[2].y,
+        pts[2].z,
+        pts[2].x,
+        pts[2].y,
+        pts[2].z,
+        pts[3].x,
+        pts[3].y,
+        pts[3].z,
+        pts[3].x,
+        pts[3].y,
+        pts[3].z,
+        pts[0].x,
+        pts[0].y,
+        pts[0].z,
+    ]);
+    geo.setAttribute('position', new THREE.BufferAttribute(v, 3));
+    return geo;
+}
+
+function buildPreviewGeo(
+    THREE: typeof import('three'),
+    pts: THREE.Vector3[],
+): THREE.BufferGeometry {
+    const geo = new THREE.BufferGeometry();
+    const arr: number[] = [];
+    for (let i = 0; i < pts.length - 1; i++) {
+        arr.push(
+            pts[i].x,
+            pts[i].y,
+            pts[i].z,
+            pts[i + 1].x,
+            pts[i + 1].y,
+            pts[i + 1].z,
+        );
+    }
+    geo.setAttribute(
+        'position',
+        new THREE.BufferAttribute(new Float32Array(arr), 3),
+    );
+    return geo;
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function ARMeasure() {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const overlayRef = useRef<HTMLDivElement>(null);
 
-    // XR state
+    // XR refs
     const xrSessionRef = useRef<XRSession | null>(null);
     const xrRefSpaceRef = useRef<XRReferenceSpace | null>(null);
-    const xrViewerSpaceRef = useRef<XRReferenceSpace | null>(null);
     const xrHitTestSourceRef = useRef<XRHitTestSource | null>(null);
     const rafHandleRef = useRef<number>(0);
 
-    // Three.js state
+    // Three.js refs
     const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
     const sceneRef = useRef<THREE.Scene | null>(null);
     const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
     const reticleRef = useRef<THREE.Mesh | null>(null);
-    const placedObjectsRef = useRef<PlacedObject[]>([]);
-    const objectCounterRef = useRef(0);
     const threeLoadedRef = useRef(false);
 
+    // Quad state refs (mutable, no re-render in frame loop)
+    const pendingRef = useRef<PendingState>({
+        corners: [],
+        previewLines: null,
+    });
+    const quadsRef = useRef<QuadGroup[]>([]);
+    const quadCounterRef = useRef(0);
+
+    // UI state
     const [arSupported, setArSupported] = useState<boolean | null>(null);
     const [sessionActive, setSessionActive] = useState(false);
-    const [objectCount, setObjectCount] = useState(0);
     const [statusMsg, setStatusMsg] = useState('Checking AR support…');
+    const [pendingCount, setPendingCount] = useState(0);
+    const [quadCount, setQuadCount] = useState(0);
 
-    // ── Check AR support on mount ──────────────────────────────────────────────
+    // ── AR support check ────────────────────────────────────────────────────────
 
     useEffect(() => {
         if (!navigator.xr) {
@@ -72,11 +233,11 @@ export default function ARMeasure() {
         }
         navigator.xr
             .isSessionSupported('immersive-ar')
-            .then((supported) => {
-                setArSupported(supported);
+            .then((ok) => {
+                setArSupported(ok);
                 setStatusMsg(
-                    supported
-                        ? 'AR ready. Tap Start AR to begin.'
+                    ok
+                        ? 'AR ready — tap Start AR to begin.'
                         : 'Immersive AR not supported on this device.',
                 );
             })
@@ -86,19 +247,16 @@ export default function ARMeasure() {
             });
     }, []);
 
-    // ── Build Three.js scene ───────────────────────────────────────────────────
+    // ── Init Three.js ────────────────────────────────────────────────────────────
 
     const initThree = useCallback(async (canvas: HTMLCanvasElement) => {
         if (threeLoadedRef.current) return;
-
         await loadScript(
             'https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js',
         );
         threeLoadedRef.current = true;
-
         const THREE = window.THREE;
 
-        // Renderer
         const renderer = new THREE.WebGLRenderer({
             canvas,
             alpha: true,
@@ -109,17 +267,13 @@ export default function ARMeasure() {
         renderer.xr.enabled = true;
         rendererRef.current = renderer;
 
-        // Scene
         const scene = new THREE.Scene();
         sceneRef.current = scene;
-
-        // Lighting
         scene.add(new THREE.HemisphereLight(0xffffff, 0xbbbbff, 1));
-        const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
-        dirLight.position.set(0.5, 1, 1);
-        scene.add(dirLight);
+        const dir = new THREE.DirectionalLight(0xffffff, 0.8);
+        dir.position.set(0.5, 1, 1);
+        scene.add(dir);
 
-        // Camera
         const camera = new THREE.PerspectiveCamera(
             70,
             window.innerWidth / window.innerHeight,
@@ -128,108 +282,142 @@ export default function ARMeasure() {
         );
         cameraRef.current = camera;
 
-        // Reticle — animated ring
-        const reticleGeo = new THREE.RingGeometry(0.05, 0.07, 32);
-        reticleGeo.applyMatrix4(
-            new THREE.Matrix4().makeRotationX(-Math.PI / 2),
-        );
-        const reticleMat = new THREE.MeshBasicMaterial({
-            color: 0x00e5ff,
+        // Reticle ring
+        const rGeo = new THREE.RingGeometry(0.04, 0.06, 32);
+        rGeo.applyMatrix4(new THREE.Matrix4().makeRotationX(-Math.PI / 2));
+        const rMat = new THREE.MeshBasicMaterial({
+            color: CORNER_COLOR,
             side: THREE.DoubleSide,
             transparent: true,
-            opacity: 0.85,
+            opacity: 0.9,
         });
-        const reticle = new THREE.Mesh(reticleGeo, reticleMat);
+        const reticle = new THREE.Mesh(rGeo, rMat);
         reticle.matrixAutoUpdate = false;
         reticle.visible = false;
         scene.add(reticle);
         reticleRef.current = reticle;
 
-        // Resize
-        const onResize = () => {
+        window.addEventListener('resize', () => {
             renderer.setSize(window.innerWidth, window.innerHeight);
             camera.aspect = window.innerWidth / window.innerHeight;
             camera.updateProjectionMatrix();
-        };
-        window.addEventListener('resize', onResize);
-        return () => window.removeEventListener('resize', onResize);
+        });
     }, []);
 
-    // ── Create placed object ───────────────────────────────────────────────────
+    // ── Place a corner sphere ────────────────────────────────────────────────────
 
-    const createPlacedObject = useCallback((matrix: Float32Array) => {
-        if (!sceneRef.current) return;
+    const placeCornerMesh = useCallback((pos: THREE.Vector3): THREE.Mesh => {
         const THREE = window.THREE;
-
-        // Stack of cylinders ≈ a simple flower/pin
-        const group = new THREE.Group();
-
-        // Stem
-        const stemGeo = new THREE.CylinderGeometry(0.005, 0.005, 0.12, 8);
-        const stemMat = new THREE.MeshStandardMaterial({ color: 0x4caf50 });
-        const stem = new THREE.Mesh(stemGeo, stemMat);
-        stem.position.y = 0.06;
-        group.add(stem);
-
-        // Head
-        const headGeo = new THREE.SphereGeometry(0.025, 16, 16);
-        const hue = Math.random();
-        const headMat = new THREE.MeshStandardMaterial({
-            color: new THREE.Color().setHSL(hue, 0.9, 0.55),
-            roughness: 0.3,
-            metalness: 0.1,
+        const geo = new THREE.SphereGeometry(0.018, 16, 16);
+        const mat = new THREE.MeshStandardMaterial({
+            color: CORNER_COLOR,
+            emissive: CORNER_COLOR,
+            emissiveIntensity: 0.5,
         });
-        const head = new THREE.Mesh(headGeo, headMat);
-        head.position.y = 0.13;
-        group.add(head);
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.position.copy(pos);
+        sceneRef.current!.add(mesh);
+        return mesh;
+    }, []);
 
-        // Drop shadow disc
-        const shadowGeo = new THREE.CircleGeometry(0.06, 32);
-        const shadowMat = new THREE.MeshBasicMaterial({
-            color: 0x000000,
+    // ── Finalise quad from 4 corners ────────────────────────────────────────────
+
+    const finaliseQuad = useCallback((corners: CornerPoint[]) => {
+        const THREE = window.THREE;
+        const scene = sceneRef.current!;
+        const pts = corners.map((c) => c.position);
+
+        // Filled translucent face
+        const faceMat = new THREE.MeshBasicMaterial({
+            color: QUAD_COLOR,
             transparent: true,
-            opacity: 0.25,
+            opacity: 0.15,
+            side: THREE.DoubleSide,
             depthWrite: false,
         });
-        const shadowMesh = new THREE.Mesh(shadowGeo, shadowMat);
-        shadowMesh.rotation.x = -Math.PI / 2;
-        shadowMesh.position.y = 0.001;
-        group.add(shadowMesh);
+        const faceMesh = new THREE.Mesh(buildQuadGeo(THREE, pts), faceMat);
+        scene.add(faceMesh);
 
-        // Apply hit-test matrix
-        const m = new THREE.Matrix4();
-        m.fromArray(matrix);
-        const pos = new THREE.Vector3();
-        const quat = new THREE.Quaternion();
-        const scale = new THREE.Vector3();
-        m.decompose(pos, quat, scale);
-        group.position.copy(pos);
-        group.quaternion.copy(quat);
+        // Edge outline
+        const edgeMat = new THREE.LineBasicMaterial({ color: EDGE_COLOR });
+        const edgeLines = new THREE.LineSegments(
+            buildEdgeGeo(THREE, pts),
+            edgeMat,
+        );
+        scene.add(edgeLines);
 
-        sceneRef.current.add(group);
-
-        const id = ++objectCounterRef.current;
-        placedObjectsRef.current.push({
-            id,
-            matrix,
-            mesh: group as unknown as THREE.Mesh,
-        });
-
-        // Prune oldest
-        if (placedObjectsRef.current.length > MAX_OBJECTS) {
-            const oldest = placedObjectsRef.current.shift();
-            if (oldest)
-                sceneRef.current.remove(
-                    oldest.mesh as unknown as THREE.Object3D,
-                );
+        // Side-length labels (4 sides: 0→1, 1→2, 2→3, 3→0)
+        const labelData: LabelData[] = [];
+        for (let i = 0; i < 4; i++) {
+            const a = pts[i];
+            const b = pts[(i + 1) % 4];
+            const dist = a.distanceTo(b);
+            const mid = new THREE.Vector3()
+                .addVectors(a, b)
+                .multiplyScalar(0.5);
+            mid.y += 0.045;
+            const label = makeLabelSprite(THREE, fmtM(dist));
+            label.sprite.position.copy(mid);
+            scene.add(label.sprite);
+            labelData.push(label);
         }
 
-        setObjectCount(placedObjectsRef.current.length);
+        quadsRef.current.push({
+            id: ++quadCounterRef.current,
+            corners,
+            faceMesh,
+            edgeLines,
+            labelData,
+        });
+        setQuadCount(quadsRef.current.length);
     }, []);
 
-    // ── XR frame loop ──────────────────────────────────────────────────────────
-    // Store the callback in a ref so it can call itself recursively without
-    // creating a circular useCallback dependency.
+    // ── onSelect: tap → place corner ────────────────────────────────────────────
+
+    const onSelect = useCallback(() => {
+        const reticle = reticleRef.current;
+        const scene = sceneRef.current;
+        if (!reticle?.visible || !scene) return;
+
+        const THREE = window.THREE;
+        const mat4 = new THREE.Matrix4().fromArray(reticle.matrix.elements);
+        const pos = new THREE.Vector3().setFromMatrixPosition(mat4);
+        const pending = pendingRef.current;
+
+        // Remove old preview
+        if (pending.previewLines) {
+            scene.remove(pending.previewLines);
+            pending.previewLines = null;
+        }
+
+        const cornerMesh = placeCornerMesh(pos);
+        pending.corners.push({ position: pos.clone(), mesh: cornerMesh });
+
+        if (pending.corners.length === 4) {
+            // Close the quad
+            finaliseQuad([...pending.corners]);
+            pendingRef.current = { corners: [], previewLines: null };
+            setPendingCount(0);
+        } else {
+            // Draw dashed preview lines through placed corners
+            if (pending.corners.length >= 2) {
+                const ppts = pending.corners.map((c) => c.position);
+                const pGeo = buildPreviewGeo(THREE, ppts);
+                const pMat = new THREE.LineDashedMaterial({
+                    color: CORNER_COLOR,
+                    dashSize: 0.03,
+                    gapSize: 0.02,
+                });
+                const lines = new THREE.LineSegments(pGeo, pMat);
+                lines.computeLineDistances();
+                scene.add(lines);
+                pending.previewLines = lines;
+            }
+            setPendingCount(pending.corners.length);
+        }
+    }, [placeCornerMesh, finaliseQuad]);
+
+    // ── XR frame loop ────────────────────────────────────────────────────────────
 
     const onXRFrameRef = useRef<(t: number, frame: XRFrame) => void>(null!);
 
@@ -243,7 +431,6 @@ export default function ARMeasure() {
         const scene = sceneRef.current;
         const camera = cameraRef.current;
         const reticle = reticleRef.current;
-
         if (
             !renderer ||
             !scene ||
@@ -263,6 +450,43 @@ export default function ARMeasure() {
                 if (hitPose) {
                     reticle.visible = true;
                     reticle.matrix.fromArray(hitPose.transform.matrix);
+
+                    // Live preview: extend dashed line to current reticle position
+                    const pending = pendingRef.current;
+                    if (pending.corners.length >= 1) {
+                        const THREE = window.THREE;
+                        const rPos = new THREE.Vector3().setFromMatrixPosition(
+                            new THREE.Matrix4().fromArray(
+                                hitPose.transform.matrix,
+                            ),
+                        );
+                        const ppts = [
+                            ...pending.corners.map((c) => c.position),
+                            rPos,
+                        ];
+
+                        if (pending.previewLines) {
+                            pending.previewLines.geometry.dispose();
+                            pending.previewLines.geometry = buildPreviewGeo(
+                                THREE,
+                                ppts,
+                            );
+                            (
+                                pending.previewLines as THREE.LineSegments
+                            ).computeLineDistances();
+                        } else {
+                            const pGeo = buildPreviewGeo(THREE, ppts);
+                            const pMat = new THREE.LineDashedMaterial({
+                                color: CORNER_COLOR,
+                                dashSize: 0.03,
+                                gapSize: 0.02,
+                            });
+                            const lines = new THREE.LineSegments(pGeo, pMat);
+                            lines.computeLineDistances();
+                            scene.add(lines);
+                            pending.previewLines = lines;
+                        }
+                    }
                 }
             }
         }
@@ -270,22 +494,10 @@ export default function ARMeasure() {
         renderer.render(scene, camera);
     };
 
-    // ── Select handler (tap to place) ─────────────────────────────────────────
-
-    const onSelect = useCallback(() => {
-        const reticle = reticleRef.current;
-        if (reticle?.visible) {
-            const m = new Float32Array(16);
-            reticle.matrix.toArray(m);
-            createPlacedObject(m);
-        }
-    }, [createPlacedObject]);
-
-    // ── Start AR session ───────────────────────────────────────────────────────
+    // ── Start AR ─────────────────────────────────────────────────────────────────
 
     const startAR = useCallback(async () => {
         if (!canvasRef.current) return;
-
         await initThree(canvasRef.current);
 
         const session = await navigator.xr!.requestSession('immersive-ar', {
@@ -295,7 +507,6 @@ export default function ARMeasure() {
                 ? { domOverlay: { root: overlayRef.current } }
                 : {}),
         });
-
         xrSessionRef.current = session;
 
         const renderer = rendererRef.current!;
@@ -307,20 +518,17 @@ export default function ARMeasure() {
             xrHitTestSourceRef.current = null;
             xrSessionRef.current = null;
             setSessionActive(false);
-            setStatusMsg('Session ended. Tap Start AR to restart.');
+            setStatusMsg('Session ended — tap Start AR to restart.');
         });
 
         session.addEventListener('select', onSelect);
 
-        // Viewer space → hit-test source
         const viewerSpace = await session.requestReferenceSpace('viewer');
-        xrViewerSpaceRef.current = viewerSpace;
         const hitTestSource = await session.requestHitTestSource!({
             space: viewerSpace,
         });
         xrHitTestSourceRef.current = hitTestSource!;
 
-        // Local reference space → render loop
         const refSpace = await session.requestReferenceSpace('local');
         xrRefSpaceRef.current = refSpace;
 
@@ -328,43 +536,89 @@ export default function ARMeasure() {
             onXRFrameRef.current,
         );
         setSessionActive(true);
-        setStatusMsg('Point at a surface, then tap to place objects.');
+        setStatusMsg('Tap a surface to place corner 1 of 4.');
     }, [initThree, onSelect]);
 
-    // ── End AR session ─────────────────────────────────────────────────────────
+    // ── End AR ───────────────────────────────────────────────────────────────────
 
     const endAR = useCallback(async () => {
-        if (xrSessionRef.current) {
-            await xrSessionRef.current.end();
-        }
+        if (xrSessionRef.current) await xrSessionRef.current.end();
     }, []);
 
-    // ── Clear placed objects ───────────────────────────────────────────────────
+    // ── Clear all ────────────────────────────────────────────────────────────────
 
-    const clearObjects = useCallback(() => {
+    const clearAll = useCallback(() => {
         const scene = sceneRef.current;
         if (!scene) return;
-        placedObjectsRef.current.forEach((o) =>
-            scene.remove(o.mesh as unknown as THREE.Object3D),
-        );
-        placedObjectsRef.current = [];
-        setObjectCount(0);
+        quadsRef.current.forEach((q) => {
+            scene.remove(q.faceMesh);
+            scene.remove(q.edgeLines);
+            q.corners.forEach((c) => scene.remove(c.mesh));
+            q.labelData.forEach((l) => scene.remove(l.sprite));
+        });
+        quadsRef.current = [];
+        setQuadCount(0);
+        const p = pendingRef.current;
+        p.corners.forEach((c) => scene.remove(c.mesh));
+        if (p.previewLines) scene.remove(p.previewLines);
+        pendingRef.current = { corners: [], previewLines: null };
+        setPendingCount(0);
     }, []);
 
-    // ── Render ─────────────────────────────────────────────────────────────────
+    // ── Undo last corner ─────────────────────────────────────────────────────────
+
+    const undoCorner = useCallback(() => {
+        const scene = sceneRef.current;
+        const pending = pendingRef.current;
+        if (!scene || pending.corners.length === 0) return;
+        const last = pending.corners.pop()!;
+        scene.remove(last.mesh);
+        if (pending.previewLines) {
+            scene.remove(pending.previewLines);
+            pending.previewLines = null;
+        }
+        // Rebuild preview for remaining corners
+        if (pending.corners.length >= 2) {
+            const THREE = window.THREE;
+            const ppts = pending.corners.map((c) => c.position);
+            const pGeo = buildPreviewGeo(THREE, ppts);
+            const pMat = new THREE.LineDashedMaterial({
+                color: CORNER_COLOR,
+                dashSize: 0.03,
+                gapSize: 0.02,
+            });
+            const lines = new THREE.LineSegments(pGeo, pMat);
+            lines.computeLineDistances();
+            scene.add(lines);
+            pending.previewLines = lines;
+        }
+        setPendingCount(pending.corners.length);
+    }, []);
+
+    // ── Hint ────────────────────────────────────────────────────────────────────
+
+    const hints = [
+        'Tap to place corner 1 of 4',
+        'Tap to place corner 2 of 4',
+        'Tap to place corner 3 of 4',
+        'Tap final corner — quad closes!',
+    ];
+    const hintMsg = hints[pendingCount] ?? hints[0];
+
+    // ── Render ───────────────────────────────────────────────────────────────────
 
     return (
         <div
             style={{
                 position: 'fixed',
                 inset: 0,
-                background: '#0a0a0f',
-                fontFamily: "'DM Mono', 'Fira Code', monospace",
+                background: '#090910',
+                fontFamily: "'DM Mono','Fira Code',monospace",
                 color: '#e0e0e0',
                 overflow: 'hidden',
             }}
         >
-            {/* AR canvas — fills the screen */}
+            {/* AR canvas */}
             <canvas
                 ref={canvasRef}
                 style={{
@@ -376,7 +630,7 @@ export default function ARMeasure() {
                 }}
             />
 
-            {/* DOM overlay (visible during AR) */}
+            {/* DOM overlay */}
             <div
                 ref={overlayRef}
                 style={{
@@ -387,7 +641,7 @@ export default function ARMeasure() {
                     flexDirection: 'column',
                     justifyContent: 'space-between',
                     padding:
-                        'env(safe-area-inset-top, 16px) 16px env(safe-area-inset-bottom, 24px)',
+                        'env(safe-area-inset-top,16px) 16px env(safe-area-inset-bottom,24px)',
                 }}
             >
                 {/* Top bar */}
@@ -398,64 +652,97 @@ export default function ARMeasure() {
                             display: 'flex',
                             justifyContent: 'space-between',
                             alignItems: 'flex-start',
-                            gap: 12,
+                            gap: 10,
                         }}
                     >
                         <div
-                            style={{
-                                background: 'rgba(0,0,0,0.55)',
-                                backdropFilter: 'blur(12px)',
-                                border: '1px solid rgba(255,255,255,0.1)',
-                                borderRadius: 12,
-                                padding: '8px 14px',
-                                fontSize: 12,
+                            style={glass({
                                 color: '#00e5ff',
-                                letterSpacing: '0.05em',
-                            }}
+                                fontSize: 11,
+                                letterSpacing: '0.07em',
+                            })}
                         >
                             ● LIVE AR
                         </div>
-
                         <div
-                            style={{
-                                background: 'rgba(0,0,0,0.55)',
-                                backdropFilter: 'blur(12px)',
-                                border: '1px solid rgba(255,255,255,0.1)',
-                                borderRadius: 12,
-                                padding: '8px 14px',
-                                fontSize: 12,
+                            style={glass({
                                 display: 'flex',
-                                gap: 12,
+                                gap: 16,
+                                fontSize: 12,
                                 alignItems: 'center',
-                            }}
+                            })}
                         >
-                            <span style={{ color: '#aaa' }}>Objects</span>
-                            <span style={{ color: '#fff', fontWeight: 700 }}>
-                                {objectCount}/{MAX_OBJECTS}
+                            <span>
+                                <span style={{ color: '#666' }}>Quads </span>
+                                <b style={{ color: '#fff' }}>{quadCount}</b>
+                            </span>
+                            <span style={{ color: '#333' }}>│</span>
+                            <span>
+                                <span style={{ color: '#666' }}>Pts </span>
+                                <b
+                                    style={{
+                                        color:
+                                            pendingCount > 0
+                                                ? '#ffd740'
+                                                : '#fff',
+                                    }}
+                                >
+                                    {pendingCount}/4
+                                </b>
                             </span>
                         </div>
                     </div>
                 )}
 
-                {/* Bottom controls */}
+                {/* Middle hint */}
+                {sessionActive && (
+                    <div style={{ display: 'flex', justifyContent: 'center' }}>
+                        <div
+                            style={glass({
+                                fontSize: 12,
+                                color: '#ffd740',
+                                letterSpacing: '0.05em',
+                            })}
+                        >
+                            {hintMsg}
+                        </div>
+                    </div>
+                )}
+
+                {/* Bottom buttons */}
                 {sessionActive && (
                     <div
                         style={{
                             pointerEvents: 'all',
                             display: 'flex',
-                            gap: 12,
+                            gap: 10,
                             justifyContent: 'center',
                         }}
                     >
                         <button
-                            onClick={clearObjects}
-                            style={btnStyle('#1a1a2e', 'rgba(255,255,255,0.1)')}
+                            onClick={undoCorner}
+                            disabled={pendingCount === 0}
+                            style={btn(
+                                '#1a1a2e',
+                                'rgba(255,221,64,0.35)',
+                                pendingCount === 0,
+                            )}
+                        >
+                            Undo
+                        </button>
+                        <button
+                            onClick={clearAll}
+                            style={btn(
+                                '#1a1a2e',
+                                'rgba(255,255,255,0.12)',
+                                false,
+                            )}
                         >
                             Clear
                         </button>
                         <button
                             onClick={endAR}
-                            style={btnStyle('#2e1a1a', '#ff5252')}
+                            style={btn('#2e1a1a', '#ff5252', false)}
                         >
                             Exit AR
                         </button>
@@ -463,7 +750,7 @@ export default function ARMeasure() {
                 )}
             </div>
 
-            {/* Pre-session landing UI */}
+            {/* Landing */}
             {!sessionActive && (
                 <div
                     style={{
@@ -473,125 +760,113 @@ export default function ARMeasure() {
                         flexDirection: 'column',
                         alignItems: 'center',
                         justifyContent: 'center',
-                        gap: 32,
+                        gap: 28,
                         padding: 24,
                     }}
                 >
-                    {/* Title */}
                     <div style={{ textAlign: 'center' }}>
                         <h1
                             style={{
                                 margin: 0,
-                                fontSize: 'clamp(28px, 6vw, 52px)',
+                                fontSize: 'clamp(24px,6vw,46px)',
                                 fontWeight: 800,
                                 letterSpacing: '-0.02em',
                                 background:
-                                    'linear-gradient(135deg, #00e5ff 0%, #7c4dff 100%)',
+                                    'linear-gradient(135deg,#00e5ff,#7c4dff)',
                                 WebkitBackgroundClip: 'text',
                                 WebkitTextFillColor: 'transparent',
                             }}
                         >
-                            AR Hit Test
+                            AR Quad Measure
                         </h1>
                         <p
                             style={{
                                 margin: '8px 0 0',
-                                fontSize: 13,
-                                color: '#666',
-                                letterSpacing: '0.12em',
+                                fontSize: 11,
+                                color: '#444',
+                                letterSpacing: '0.14em',
                                 textTransform: 'uppercase',
                             }}
                         >
-                            Place objects on real surfaces
+                            4-point surface tracing
                         </p>
                     </div>
 
-                    {/* Status card */}
                     <div
-                        style={{
-                            background: 'rgba(255,255,255,0.04)',
-                            border: '1px solid rgba(255,255,255,0.08)',
-                            borderRadius: 16,
-                            padding: '16px 24px',
-                            maxWidth: 320,
+                        style={glass({
+                            maxWidth: 300,
                             width: '100%',
                             textAlign: 'center',
                             fontSize: 13,
-                            color: arSupported === false ? '#ff5252' : '#aaa',
-                            lineHeight: 1.6,
-                        }}
+                            color: arSupported === false ? '#ff5252' : '#666',
+                            lineHeight: 1.7,
+                        })}
                     >
                         {statusMsg}
                     </div>
 
-                    {/* CTA */}
                     {arSupported && (
                         <button
                             onClick={startAR}
                             style={{
                                 background:
-                                    'linear-gradient(135deg, #00e5ff, #7c4dff)',
+                                    'linear-gradient(135deg,#00e5ff,#7c4dff)',
                                 border: 'none',
                                 borderRadius: 14,
-                                padding: '16px 48px',
-                                fontSize: 15,
+                                padding: '14px 44px',
+                                fontSize: 14,
                                 fontWeight: 700,
                                 color: '#fff',
                                 letterSpacing: '0.08em',
                                 textTransform: 'uppercase',
                                 cursor: 'pointer',
-                                boxShadow: '0 0 40px rgba(0,229,255,0.25)',
-                                transition: 'transform 0.15s, box-shadow 0.15s',
-                            }}
-                            onMouseEnter={(e) => {
-                                (
-                                    e.currentTarget as HTMLButtonElement
-                                ).style.transform = 'scale(1.04)';
-                            }}
-                            onMouseLeave={(e) => {
-                                (
-                                    e.currentTarget as HTMLButtonElement
-                                ).style.transform = 'scale(1)';
+                                boxShadow: '0 0 36px rgba(0,229,255,0.28)',
                             }}
                         >
                             Start AR
                         </button>
                     )}
 
-                    {/* Instructions */}
                     {arSupported && (
-                        <ul
+                        <div
                             style={{
-                                listStyle: 'none',
-                                margin: 0,
-                                padding: 0,
                                 display: 'flex',
                                 flexDirection: 'column',
                                 gap: 10,
-                                maxWidth: 300,
+                                maxWidth: 260,
                                 width: '100%',
                             }}
                         >
-                            {[
-                                ['📷', 'Allow camera access when prompted'],
-                                ['🔍', 'Move device to scan surfaces'],
-                                ['✨', 'Tap the screen to place an object'],
-                            ].map(([icon, text]) => (
-                                <li
-                                    key={text}
+                            {(
+                                [
+                                    'Point at a flat surface',
+                                    'Tap 4 corners to trace a quad',
+                                    'Side lengths appear automatically',
+                                    'Keep tapping to add more quads',
+                                ] as string[]
+                            ).map((t, i) => (
+                                <div
+                                    key={t}
                                     style={{
                                         display: 'flex',
                                         gap: 12,
-                                        alignItems: 'flex-start',
-                                        fontSize: 13,
-                                        color: '#666',
+                                        fontSize: 12,
+                                        color: '#555',
                                     }}
                                 >
-                                    <span style={{ fontSize: 16 }}>{icon}</span>
-                                    <span>{text}</span>
-                                </li>
+                                    <span
+                                        style={{
+                                            color: '#00e5ff',
+                                            fontWeight: 700,
+                                            flexShrink: 0,
+                                        }}
+                                    >
+                                        0{i + 1}
+                                    </span>
+                                    <span>{t}</span>
+                                </div>
                             ))}
-                        </ul>
+                        </div>
                     )}
                 </div>
             )}
@@ -599,20 +874,36 @@ export default function ARMeasure() {
     );
 }
 
-// ─── Tiny style helper ────────────────────────────────────────────────────────
+// ─── Style helpers ─────────────────────────────────────────────────────────────
 
-function btnStyle(bg: string, border: string): React.CSSProperties {
+function glass(extra: React.CSSProperties = {}): React.CSSProperties {
+    return {
+        background: 'rgba(0,0,0,0.6)',
+        backdropFilter: 'blur(14px)',
+        border: '1px solid rgba(255,255,255,0.07)',
+        borderRadius: 12,
+        padding: '10px 16px',
+        ...extra,
+    };
+}
+
+function btn(
+    bg: string,
+    border: string,
+    disabled: boolean,
+): React.CSSProperties {
     return {
         background: bg,
         border: `1px solid ${border}`,
         borderRadius: 12,
-        padding: '12px 28px',
-        fontSize: 13,
+        padding: '11px 22px',
+        fontSize: 12,
         fontWeight: 600,
-        color: '#fff',
+        color: disabled ? '#444' : '#fff',
         letterSpacing: '0.06em',
-        textTransform: 'uppercase' as const,
-        cursor: 'pointer',
+        textTransform: 'uppercase',
+        cursor: disabled ? 'default' : 'pointer',
         fontFamily: 'inherit',
+        opacity: disabled ? 0.45 : 1,
     };
 }
