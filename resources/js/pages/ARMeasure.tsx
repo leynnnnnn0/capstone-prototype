@@ -11,7 +11,6 @@ export default function ARMeasure() {
     const [arState, setArState] = useState<ARState>('checking');
     const [errorMsg, setErrorMsg] = useState('');
 
-    // Check AR support on mount
     useEffect(() => {
         if (!navigator.xr) {
             setArState('unsupported');
@@ -23,7 +22,6 @@ export default function ARMeasure() {
             .catch(() => setArState('unsupported'));
     }, []);
 
-    // Build renderer once
     useEffect(() => {
         const canvas = canvasRef.current;
         if (!canvas) return;
@@ -71,13 +69,8 @@ export default function ARMeasure() {
         dir.position.set(1, 2, 1);
         scene.add(dir);
 
-        // 3D reticle that sticks to the wall surface in the scene
-        const reticle = new THREE.Mesh(
-            new THREE.TorusGeometry(0.06, 0.008, 16, 64),
-            new THREE.MeshBasicMaterial({ color: 0x00ffff }),
-        );
-        reticle.visible = false;
-        scene.add(reticle);
+        // Stores the last valid hit pose so onSelect knows where to place the panel
+        let lastHitMatrix: THREE.Matrix4 | null = null;
 
         const wallObjects: THREE.Group[] = [];
 
@@ -108,10 +101,13 @@ export default function ARMeasure() {
         }
 
         function onSelect() {
-            if (!reticle.visible) return;
+            if (!lastHitMatrix) return;
             const panel = createPanel();
-            panel.position.copy(reticle.position);
-            panel.quaternion.copy(reticle.quaternion);
+            const pos = new THREE.Vector3();
+            const quat = new THREE.Quaternion();
+            lastHitMatrix.decompose(pos, quat, new THREE.Vector3());
+            panel.position.copy(pos);
+            panel.quaternion.copy(quat);
             scene.add(panel);
             wallObjects.push(panel);
             if (wallObjects.length > MAX_WALL_OBJECTS) {
@@ -156,29 +152,20 @@ export default function ARMeasure() {
                     hits.length > 0 ? hits[0].getPose(xrRefSpace) : null;
 
                 if (hit) {
-                    // Position the 3D reticle on the wall surface
-                    const mat = new THREE.Matrix4().fromArray(
+                    lastHitMatrix = new THREE.Matrix4().fromArray(
                         hit.transform.matrix,
                     );
-                    mat.decompose(
-                        reticle.position,
-                        reticle.quaternion,
-                        new THREE.Vector3(),
-                    );
-                    reticle.visible = true;
-
-                    // Turn the HTML center ring CYAN — direct DOM, no setState
+                    // Wall detected — ring turns cyan
                     if (ringRef.current) {
                         ringRef.current.style.borderColor = '#00ffff';
-                        ringRef.current.style.boxShadow = '0 0 0 2px #00ffff55';
+                        ringRef.current.style.boxShadow = '0 0 12px #00ffff';
                     }
                 } else {
-                    reticle.visible = false;
-
-                    // Turn the HTML center ring WHITE
+                    lastHitMatrix = null;
+                    // No surface — ring stays white
                     if (ringRef.current) {
                         ringRef.current.style.borderColor =
-                            'rgba(255,255,255,0.5)';
+                            'rgba(255,255,255,0.6)';
                         ringRef.current.style.boxShadow = 'none';
                     }
                 }
@@ -212,24 +199,25 @@ export default function ARMeasure() {
                 style={{ display: 'block', width: '100%', height: '100%' }}
             />
 
-            {/* CENTER RETICLE — always dead center, color changes on detection */}
+            {/* THE RING — fixed to screen center using position absolute + fixed pixel offset */}
             {arState === 'active' && (
                 <div
+                    ref={ringRef}
                     style={{
-                        position: 'absolute',
+                        position:
+                            'fixed' /* fixed to the VIEWPORT, not the canvas */,
                         top: '50%',
                         left: '50%',
                         width: 48,
                         height: 48,
-                        marginTop:
-                            -24 /* exactly half height — no transform needed */,
-                        marginLeft: -24 /* exactly half width */,
+                        marginTop: -24,
+                        marginLeft: -24,
                         borderRadius: '50%',
-                        border: '2px solid rgba(255,255,255,0.5)',
+                        border: '2.5px solid rgba(255,255,255,0.6)',
                         boxShadow: 'none',
                         pointerEvents: 'none',
+                        zIndex: 9999 /* always on top of everything */,
                     }}
-                    ref={ringRef}
                 />
             )}
 
@@ -238,7 +226,6 @@ export default function ARMeasure() {
                     <p style={s.hint}>Checking AR support…</p>
                 </Overlay>
             )}
-
             {arState === 'unsupported' && (
                 <Overlay>
                     <p style={s.title}>AR Not Available</p>
@@ -247,7 +234,6 @@ export default function ARMeasure() {
                     </p>
                 </Overlay>
             )}
-
             {arState === 'supported' && (
                 <Overlay>
                     <p style={s.title}>Wall Hit Test</p>
@@ -260,7 +246,6 @@ export default function ARMeasure() {
                     </button>
                 </Overlay>
             )}
-
             {arState === 'error' && (
                 <Overlay>
                     <p style={s.title}>Error</p>
@@ -287,12 +272,13 @@ function Overlay({ children }: { children: React.ReactNode }) {
 
 const s: Record<string, React.CSSProperties> = {
     overlay: {
-        position: 'absolute',
+        position: 'fixed',
         inset: 0,
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
         background: 'rgba(0,0,0,0.55)',
+        zIndex: 100,
     },
     card: {
         background: 'rgba(10,10,20,0.88)',
