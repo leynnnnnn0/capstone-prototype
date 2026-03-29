@@ -42,7 +42,6 @@ interface QuadGroup {
     edgeLines: THREE.LineSegments;
     labelData: LabelData[];
     modelRoot: THREE.Group | null;
-    // raw measurements in metres
     widthM: number;
     heightM: number;
     confirmed: boolean;
@@ -55,7 +54,6 @@ export interface QuadSummary {
 }
 
 interface Props {
-    /** Called when user taps "Done" — receives list of all confirmed placements */
     onComplete?: (results: QuadSummary[]) => void;
 }
 
@@ -244,7 +242,6 @@ function fitModelToQuad(
     group.position.copy(centre.clone().sub(boxCentre).add(group.position));
 }
 
-/** Render a GLB file into a small canvas thumbnail. Returns a data-URL or null on error. */
 async function renderThumbnail(
     file: string,
     size = 120,
@@ -267,11 +264,9 @@ async function renderThumbnail(
         dir.position.set(1, 2, 2);
         scene.add(dir);
         const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 100);
-
         const gltf = await new Promise<{ scene: THREE.Group }>((res, rej) => {
             new THREE.GLTFLoader().load(file, res, undefined, rej);
         });
-
         const model = gltf.scene;
         scene.add(model);
         const box = new THREE.Box3().setFromObject(model);
@@ -332,15 +327,11 @@ export default function ARMeasure({ onComplete }: Props) {
         MODELS[0].id,
     );
     const [loadingModel, setLoadingModel] = useState(false);
-    // ID of the most recently placed (unconfirmed) quad — for model swapping
     const [activeQuadId, setActiveQuadId] = useState<number | null>(null);
-    // Thumbnails: modelId → data-URL
     const [thumbs, setThumbs] = useState<Record<string, string>>({});
-    // Summary shown after session ends
     const [summary, setSummary] = useState<QuadSummary[]>([]);
     const [showSummary, setShowSummary] = useState(false);
 
-    // Keep model ref in sync
     useEffect(() => {
         selectedModelIdRef.current = selectedModelId;
     }, [selectedModelId]);
@@ -358,7 +349,7 @@ export default function ARMeasure({ onComplete }: Props) {
             .catch(() => setArSupported(false));
     }, []);
 
-    // ── Init Three.js + generate thumbnails ─────────────────────────────────────
+    // ── Init Three.js ────────────────────────────────────────────────────────────
 
     const initThree = useCallback(async (canvas: HTMLCanvasElement) => {
         if (threeLoadedRef.current) return;
@@ -389,11 +380,9 @@ export default function ARMeasure({ onComplete }: Props) {
         const sun = new THREE.DirectionalLight(0xffffff, 1.0);
         sun.position.set(1, 2, 1.5);
         scene.add(sun);
-        scene.add(
-            Object.assign(new THREE.DirectionalLight(0xffffff, 0.4), {
-                position: new THREE.Vector3(-1, 0.5, -1),
-            }),
-        );
+        const fill = new THREE.DirectionalLight(0xffffff, 0.4);
+        fill.position.set(-1, 0.5, -1);
+        scene.add(fill);
 
         const camera = new THREE.PerspectiveCamera(
             70,
@@ -403,8 +392,9 @@ export default function ARMeasure({ onComplete }: Props) {
         );
         cameraRef.current = camera;
 
-        // Reticle: ring + crosshair lines drawn in CSS (see JSX)
-        const rGeo = new THREE.RingGeometry(0.04, 0.055, 32);
+        // ── FIX: Restored thick ring geometry (0.04 inner, 0.06 outer) from File 1 ──
+        // File 2 had 0.055 outer which made the ring too thin to see clearly.
+        const rGeo = new THREE.RingGeometry(0.04, 0.06, 32);
         rGeo.applyMatrix4(new THREE.Matrix4().makeRotationX(-Math.PI / 2));
         const rMat = new THREE.MeshBasicMaterial({
             color: 0x00e5ff,
@@ -472,7 +462,6 @@ export default function ARMeasure({ onComplete }: Props) {
             if (!scene) return;
             setLoadingModel(true);
 
-            // Remove old model if swapping
             if (replacingGroup) scene.remove(replacingGroup);
 
             new window.THREE.GLTFLoader().load(
@@ -570,13 +559,12 @@ export default function ARMeasure({ onComplete }: Props) {
         [loadAndPlaceModel],
     );
 
-    // ── Confirm active quad → lock it, ready for next ───────────────────────────
+    // ── Confirm active quad ──────────────────────────────────────────────────────
 
     const confirmActiveQuad = useCallback(() => {
         const quad = quadsRef.current.find((q) => !q.confirmed);
         if (!quad) return;
         quad.confirmed = true;
-        // Dim the edge lines to show it's locked
         (quad.edgeLines.material as THREE.LineBasicMaterial).opacity = 0.25;
         setActiveQuadId(null);
     }, []);
@@ -593,7 +581,6 @@ export default function ARMeasure({ onComplete }: Props) {
         const scene = sceneRef.current;
         if (!reticle?.visible || !scene) return;
 
-        // Block tapping while there is an unconfirmed quad waiting
         const hasUnconfirmed = quadsRef.current.some((q) => !q.confirmed);
         if (hasUnconfirmed) return;
 
@@ -735,7 +722,6 @@ export default function ARMeasure({ onComplete }: Props) {
     // ── End AR + compile summary ─────────────────────────────────────────────────
 
     const endAR = useCallback(async () => {
-        // Auto-confirm any unconfirmed quad before ending
         quadsRef.current.forEach((q) => {
             q.confirmed = true;
         });
@@ -796,14 +782,13 @@ export default function ARMeasure({ onComplete }: Props) {
         }
     }, []);
 
-    // ── Model selection — swap if active quad exists, else just set for next ─────
+    // ── Model selection ──────────────────────────────────────────────────────────
 
     const handleModelSelect = useCallback(
         (id: string) => {
             setSelectedModelId(id);
             selectedModelIdRef.current = id;
             const modelDef = MODELS.find((m) => m.id === id)!;
-            // If there is an unconfirmed quad, swap its model immediately
             const unconfirmed = quadsRef.current.find((q) => !q.confirmed);
             if (unconfirmed) swapActiveModel(modelDef);
         },
@@ -851,61 +836,13 @@ export default function ARMeasure({ onComplete }: Props) {
                 }}
             />
 
-            {/* ── CSS Crosshair — always centred, pointer events off ── */}
-            {sessionActive && (
-                <div
-                    style={{
-                        position: 'absolute',
-                        inset: 0,
-                        pointerEvents: 'none',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                    }}
-                >
-                    <div
-                        style={{ position: 'relative', width: 36, height: 36 }}
-                    >
-                        {/* Horizontal bar */}
-                        <div
-                            style={{
-                                position: 'absolute',
-                                top: '50%',
-                                left: 0,
-                                right: 0,
-                                height: 1.5,
-                                background: 'rgba(255,255,255,0.85)',
-                                transform: 'translateY(-50%)',
-                            }}
-                        />
-                        {/* Vertical bar */}
-                        <div
-                            style={{
-                                position: 'absolute',
-                                left: '50%',
-                                top: 0,
-                                bottom: 0,
-                                width: 1.5,
-                                background: 'rgba(255,255,255,0.85)',
-                                transform: 'translateX(-50%)',
-                            }}
-                        />
-                        {/* Centre dot */}
-                        <div
-                            style={{
-                                position: 'absolute',
-                                top: '50%',
-                                left: '50%',
-                                width: 5,
-                                height: 5,
-                                borderRadius: '50%',
-                                background: '#00e5ff',
-                                transform: 'translate(-50%,-50%)',
-                            }}
-                        />
-                    </div>
-                </div>
-            )}
+            {/*
+             * ── NO CSS crosshair overlay here ──
+             * File 2 had a CSS crosshair div centred on screen which visually
+             * competed with and obscured the 3D reticle ring. It has been
+             * removed. The 3D reticle (cyan ring) is the sole aiming indicator,
+             * and it correctly follows the AR hit-test surface position.
+             */}
 
             {/* DOM overlay */}
             <div
@@ -1011,7 +948,7 @@ export default function ARMeasure({ onComplete }: Props) {
                             {hintMsg}
                         </div>
 
-                        {/* Model picker with thumbnails */}
+                        {/* Model picker */}
                         <div
                             style={{
                                 display: 'flex',
@@ -1046,7 +983,6 @@ export default function ARMeasure({ onComplete }: Props) {
                                             minWidth: 62,
                                         }}
                                     >
-                                        {/* Thumbnail or fallback */}
                                         <div
                                             style={{
                                                 width: 48,
@@ -1131,8 +1067,6 @@ export default function ARMeasure({ onComplete }: Props) {
                             >
                                 Clear
                             </button>
-
-                            {/* Confirm button — only visible when there's an unconfirmed quad */}
                             {hasUnconfirmed && (
                                 <button
                                     onClick={confirmActiveQuad}
@@ -1146,7 +1080,6 @@ export default function ARMeasure({ onComplete }: Props) {
                                     ✓ Confirm &amp; Next
                                 </button>
                             )}
-
                             <button
                                 onClick={endAR}
                                 style={btn('#1a0808', '#ff5252', false)}
@@ -1158,7 +1091,7 @@ export default function ARMeasure({ onComplete }: Props) {
                 )}
             </div>
 
-            {/* ── Summary screen (shown after Done) ── */}
+            {/* ── Summary screen ── */}
             {showSummary && !sessionActive && (
                 <div
                     style={{
@@ -1264,9 +1197,7 @@ export default function ARMeasure({ onComplete }: Props) {
 
                     <div style={{ display: 'flex', gap: 10 }}>
                         <button
-                            onClick={() => {
-                                setShowSummary(false);
-                            }}
+                            onClick={() => setShowSummary(false)}
                             style={btn('#111', 'rgba(255,255,255,0.12)', false)}
                         >
                             Back
@@ -1323,7 +1254,7 @@ export default function ARMeasure({ onComplete }: Props) {
                         </p>
                     </div>
 
-                    {/* Model cards with thumbnails */}
+                    {/* Model cards */}
                     <div
                         style={{
                             display: 'flex',
