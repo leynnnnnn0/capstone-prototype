@@ -4,7 +4,6 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 
 declare global {
     interface Window {
-        // The jsdelivr GLTFLoader UMD attaches to THREE.GLTFLoader, not window.GLTFLoader
         THREE: typeof import('three') & {
             GLTFLoader: new () => {
                 load: (
@@ -21,9 +20,9 @@ declare global {
 interface ModelDef {
     id: string;
     label: string;
-    icon: string; // emoji stand-in; swap for <img> if you have thumbnails
-    file: string; // path under /public/models/
-    accentColor: string; // toolbar highlight colour
+    icon: string;
+    file: string;
+    accentColor: string;
 }
 
 interface CornerPoint {
@@ -43,16 +42,10 @@ interface QuadGroup {
     corners: CornerPoint[];
     edgeLines: THREE.LineSegments;
     labelData: LabelData[];
-    modelRoot: THREE.Group | null; // null while loading
-}
-
-interface PendingState {
-    corners: CornerPoint[];
-    previewLines: THREE.LineSegments | null;
+    modelRoot: THREE.Group | null;
 }
 
 // ─── Model catalogue ──────────────────────────────────────────────────────────
-// Edit paths / labels / icons here to match your actual files.
 
 const MODELS: ModelDef[] = [
     {
@@ -84,12 +77,6 @@ const MODELS: ModelDef[] = [
         accentColor: '#ff6e40',
     },
 ];
-
-// ─── Constants ────────────────────────────────────────────────────────────────
-
-const CORNER_COLOR = 0xffffff;
-const EDGE_COLOR = 0xffffff;
-const PREVIEW_COLOR = 0x00e5ff;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -136,7 +123,7 @@ function roundRect(
 function makeLabelSprite(
     THREE: typeof import('three'),
     text: string,
-    color = '#ffffff',
+    color: string,
 ): LabelData {
     const canvas = document.createElement('canvas');
     canvas.width = 256;
@@ -214,22 +201,11 @@ function buildPreviewGeo(
     return geo;
 }
 
-/**
- * Position + scale a loaded GLTF group to fit the quad defined by 4 corners.
- *
- * Strategy:
- *  - Bottom edge  = corners[0] → corners[1]  (width reference)
- *  - Left edge    = corners[0] → corners[3]  (height reference)
- *  - Origin placed at midpoint of the quad
- *  - Model is rotated to align with the bottom edge direction
- *  - Scaled so its bounding-box width matches the quad width
- */
 function fitModelToQuad(
     THREE: typeof import('three'),
     group: THREE.Group,
     pts: THREE.Vector3[],
 ): void {
-    // Compute quad centre
     const centre = new THREE.Vector3()
         .add(pts[0])
         .add(pts[1])
@@ -237,40 +213,36 @@ function fitModelToQuad(
         .add(pts[3])
         .multiplyScalar(0.25);
 
-    // Width = bottom edge length, height = left edge length
     const quadWidth = pts[0].distanceTo(pts[1]);
     const quadHeight = pts[0].distanceTo(pts[3]);
 
-    // Direction vectors for the quad plane
-    const edgeX = new THREE.Vector3().subVectors(pts[1], pts[0]).normalize(); // width direction
-    const edgeY = new THREE.Vector3().subVectors(pts[3], pts[0]).normalize(); // height direction
+    const edgeX = new THREE.Vector3().subVectors(pts[1], pts[0]).normalize();
+    const edgeY = new THREE.Vector3().subVectors(pts[3], pts[0]).normalize();
     const normal = new THREE.Vector3().crossVectors(edgeX, edgeY).normalize();
 
-    // Build rotation matrix: X=edgeX, Y=edgeY, Z=normal
-    const rotMat = new THREE.Matrix4().makeBasis(edgeX, edgeY, normal);
-    group.setRotationFromMatrix(rotMat);
+    group.setRotationFromMatrix(
+        new THREE.Matrix4().makeBasis(edgeX, edgeY, normal),
+    );
 
-    // Compute model bounding box in its local space (before world transform)
+    // First pass: measure bounding box
+    group.position.set(0, 0, 0);
+    group.scale.set(1, 1, 1);
     group.updateMatrixWorld(true);
-    const box = new THREE.Box3().setFromObject(group);
     const size = new THREE.Vector3();
-    box.getSize(size);
+    new THREE.Box3().setFromObject(group).getSize(size);
 
-    // Scale so model width matches quad width; height scales proportionally
-    // but is clamped to quad height so it never overflows.
-    const scaleByWidth = quadWidth / (size.x || 1);
-    const scaleByHeight = quadHeight / (size.y || 1);
-    const scale = Math.min(scaleByWidth, scaleByHeight);
+    // Scale to fit quad width, clamped by height
+    const scale = Math.min(
+        quadWidth / (size.x || 1),
+        quadHeight / (size.y || 1),
+    );
     group.scale.setScalar(scale);
 
-    // Recompute box after scale to centre properly
+    // Second pass: centre on quad
     group.updateMatrixWorld(true);
-    const box2 = new THREE.Box3().setFromObject(group);
-    const centre2 = new THREE.Vector3();
-    box2.getCenter(centre2);
-
-    // Offset so model centre lands on quad centre
-    group.position.copy(centre).sub(centre2.sub(group.position));
+    const boxCentre = new THREE.Vector3();
+    new THREE.Box3().setFromObject(group).getCenter(boxCentre);
+    group.position.add(centre).sub(boxCentre);
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -279,41 +251,42 @@ export default function ARMeasure() {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const overlayRef = useRef<HTMLDivElement>(null);
 
-    // XR refs
+    // XR
     const xrSessionRef = useRef<XRSession | null>(null);
     const xrRefSpaceRef = useRef<XRReferenceSpace | null>(null);
     const xrHitTestSourceRef = useRef<XRHitTestSource | null>(null);
-    const rafHandleRef = useRef<number>(0);
 
-    // Three.js refs
+    // Three.js
     const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
     const sceneRef = useRef<THREE.Scene | null>(null);
     const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
     const reticleRef = useRef<THREE.Mesh | null>(null);
     const threeLoadedRef = useRef(false);
 
-    // Quad / pending state (mutable refs — no re-render in frame loop)
-    const pendingRef = useRef<PendingState>({
-        corners: [],
-        previewLines: null,
-    });
+    // ── Pending corners — flat independent refs, never replaced as objects ──────
+    // This is the key fix: frame loop and onSelect both mutate THE SAME arrays/refs,
+    // no object replacement that could cause one side to see a stale reference.
+    const pendingCornersRef = useRef<CornerPoint[]>([]); // corners placed so far
+    const previewLinesRef = useRef<THREE.LineSegments | null>(null); // live dashed line
+
+    // Completed quads
     const quadsRef = useRef<QuadGroup[]>([]);
     const quadCounterRef = useRef(0);
 
-    // Currently selected model (read inside onSelect via ref so it's always fresh)
+    // Selected model — ref keeps it fresh inside the XR frame callback
     const selectedModelIdRef = useRef<string>(MODELS[0].id);
 
-    // UI state
+    // UI state (React)
     const [arSupported, setArSupported] = useState<boolean | null>(null);
     const [sessionActive, setSessionActive] = useState(false);
-    const [pendingCount, setPendingCount] = useState(0);
+    const [pendingCount, setPendingCount] = useState(0); // mirrors pendingCornersRef.length
     const [quadCount, setQuadCount] = useState(0);
     const [selectedModelId, setSelectedModelId] = useState<string>(
         MODELS[0].id,
     );
     const [loadingModel, setLoadingModel] = useState(false);
 
-    // Keep ref in sync with state
+    // Keep model ref in sync with state
     useEffect(() => {
         selectedModelIdRef.current = selectedModelId;
     }, [selectedModelId]);
@@ -335,8 +308,6 @@ export default function ARMeasure() {
 
     const initThree = useCallback(async (canvas: HTMLCanvasElement) => {
         if (threeLoadedRef.current) return;
-
-        // Load Three r128 then the GLTFLoader add-on
         await loadScript(
             'https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js',
         );
@@ -355,14 +326,11 @@ export default function ARMeasure() {
         renderer.setPixelRatio(window.devicePixelRatio);
         renderer.setSize(window.innerWidth, window.innerHeight);
         renderer.xr.enabled = true;
-        renderer.outputEncoding = (THREE as any).sRGBEncoding;
-        renderer.physicallyCorrectLights = true;
+        (renderer as any).outputEncoding = (THREE as any).sRGBEncoding;
         rendererRef.current = renderer;
 
         const scene = new THREE.Scene();
         sceneRef.current = scene;
-
-        // Rich lighting for GLB models
         scene.add(new THREE.HemisphereLight(0xffffff, 0x8899aa, 1.2));
         const sun = new THREE.DirectionalLight(0xffffff, 1.0);
         sun.position.set(1, 2, 1.5);
@@ -401,14 +369,80 @@ export default function ARMeasure() {
         });
     }, []);
 
-    // ── Load a GLB and fit it to 4 corner points ────────────────────────────────
+    // ── Remove preview lines from scene completely ───────────────────────────────
+    // Single function used by BOTH onSelect and the frame loop — no duplication
+
+    const clearPreviewLines = useCallback(() => {
+        if (previewLinesRef.current && sceneRef.current) {
+            sceneRef.current.remove(previewLinesRef.current);
+            previewLinesRef.current.geometry.dispose();
+            previewLinesRef.current = null;
+        }
+    }, []);
+
+    // ── Rebuild preview lines from current pending corners + optional extra pt ──
+
+    const rebuildPreviewLines = useCallback(
+        (extraPt?: THREE.Vector3) => {
+            const scene = sceneRef.current;
+            const corners = pendingCornersRef.current;
+            if (!scene) return;
+
+            const THREE = window.THREE;
+
+            // Need at least 1 corner + the moving reticle point to draw anything
+            const pts = [
+                ...corners.map((c) => c.position),
+                ...(extraPt ? [extraPt] : []),
+            ];
+            if (pts.length < 2) {
+                clearPreviewLines();
+                return;
+            }
+
+            if (previewLinesRef.current) {
+                // Reuse existing LineSegments object — just swap geometry
+                previewLinesRef.current.geometry.dispose();
+                previewLinesRef.current.geometry = buildPreviewGeo(THREE, pts);
+                previewLinesRef.current.computeLineDistances();
+            } else {
+                const geo = buildPreviewGeo(THREE, pts);
+                const mat = new THREE.LineDashedMaterial({
+                    color: 0x00e5ff,
+                    dashSize: 0.03,
+                    gapSize: 0.02,
+                });
+                const line = new THREE.LineSegments(geo, mat);
+                line.computeLineDistances();
+                scene.add(line);
+                previewLinesRef.current = line;
+            }
+        },
+        [clearPreviewLines],
+    );
+
+    // ── Place a corner sphere in the scene ──────────────────────────────────────
+
+    const placeCornerMesh = useCallback((pos: THREE.Vector3): THREE.Mesh => {
+        const THREE = window.THREE;
+        const geo = new THREE.SphereGeometry(0.016, 16, 16);
+        const mat = new THREE.MeshStandardMaterial({
+            color: 0xffffff,
+            emissive: 0x00e5ff,
+            emissiveIntensity: 0.6,
+        });
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.position.copy(pos);
+        sceneRef.current!.add(mesh);
+        return mesh;
+    }, []);
+
+    // ── Load GLB and fit to quad ─────────────────────────────────────────────────
 
     const loadAndPlaceModel = useCallback(
         (modelDef: ModelDef, pts: THREE.Vector3[], quadId: number) => {
             const scene = sceneRef.current;
             if (!scene) return;
-            const THREE = window.THREE;
-
             setLoadingModel(true);
 
             const loader = new window.THREE.GLTFLoader();
@@ -417,12 +451,8 @@ export default function ARMeasure() {
                 (gltf) => {
                     setLoadingModel(false);
                     const group = gltf.scene;
-
-                    // Fit to quad
-                    fitModelToQuad(THREE, group, pts);
+                    fitModelToQuad(window.THREE, group, pts);
                     scene.add(group);
-
-                    // Attach to the right quad entry
                     const quad = quadsRef.current.find((q) => q.id === quadId);
                     if (quad) quad.modelRoot = group;
                 },
@@ -436,24 +466,7 @@ export default function ARMeasure() {
         [],
     );
 
-    // ── Place a corner sphere ────────────────────────────────────────────────────
-
-    const placeCornerMesh = useCallback((pos: THREE.Vector3): THREE.Mesh => {
-        const THREE = window.THREE;
-        const geo = new THREE.SphereGeometry(0.016, 16, 16);
-        const mat = new THREE.MeshStandardMaterial({
-            color: CORNER_COLOR,
-            emissive: 0x00e5ff,
-            emissiveIntensity: 0.6,
-            roughness: 0.3,
-        });
-        const mesh = new THREE.Mesh(geo, mat);
-        mesh.position.copy(pos);
-        sceneRef.current!.add(mesh);
-        return mesh;
-    }, []);
-
-    // ── Finalise quad: edge outline + labels + kick off GLB load ────────────────
+    // ── Finalise quad from 4 corners ────────────────────────────────────────────
 
     const finaliseQuad = useCallback(
         (corners: CornerPoint[], modelDef: ModelDef) => {
@@ -461,11 +474,11 @@ export default function ARMeasure() {
             const scene = sceneRef.current!;
             const pts = corners.map((c) => c.position);
 
-            // Edge outline
+            // Permanent edge outline
             const edgeMat = new THREE.LineBasicMaterial({
-                color: EDGE_COLOR,
+                color: 0xffffff,
                 transparent: true,
-                opacity: 0.6,
+                opacity: 0.5,
             });
             const edgeLines = new THREE.LineSegments(
                 buildEdgeGeo(THREE, pts),
@@ -473,7 +486,7 @@ export default function ARMeasure() {
             );
             scene.add(edgeLines);
 
-            // Side-length labels (4 sides)
+            // Side-length labels
             const labelData: LabelData[] = [];
             for (let i = 0; i < 4; i++) {
                 const a = pts[i];
@@ -482,10 +495,9 @@ export default function ARMeasure() {
                     .addVectors(a, b)
                     .multiplyScalar(0.5);
                 mid.y += 0.05;
-                const dist = a.distanceTo(b);
                 const label = makeLabelSprite(
                     THREE,
-                    fmtM(dist),
+                    fmtM(a.distanceTo(b)),
                     modelDef.accentColor,
                 );
                 label.sprite.position.copy(mid);
@@ -494,24 +506,22 @@ export default function ARMeasure() {
             }
 
             const quadId = ++quadCounterRef.current;
-            const quad: QuadGroup = {
+            quadsRef.current.push({
                 id: quadId,
                 modelId: modelDef.id,
                 corners,
                 edgeLines,
                 labelData,
                 modelRoot: null,
-            };
-            quadsRef.current.push(quad);
+            });
             setQuadCount(quadsRef.current.length);
 
-            // Load + place the GLB model
             loadAndPlaceModel(modelDef, pts, quadId);
         },
         [loadAndPlaceModel],
     );
 
-    // ── onSelect: tap → place corner ────────────────────────────────────────────
+    // ── onSelect: called on every tap ───────────────────────────────────────────
 
     const onSelect = useCallback(() => {
         const reticle = reticleRef.current;
@@ -519,50 +529,40 @@ export default function ARMeasure() {
         if (!reticle?.visible || !scene) return;
 
         const THREE = window.THREE;
+
+        // World position of the reticle hit point
         const mat4 = new THREE.Matrix4().fromArray(reticle.matrix.elements);
         const pos = new THREE.Vector3().setFromMatrixPosition(mat4);
-        const pending = pendingRef.current;
 
-        // Remove old preview lines before rebuilding
-        if (pending.previewLines) {
-            scene.remove(pending.previewLines);
-            pending.previewLines = null;
-        }
+        // Place corner sphere
+        const mesh = placeCornerMesh(pos);
+        pendingCornersRef.current.push({ position: pos.clone(), mesh });
 
-        const cornerMesh = placeCornerMesh(pos);
-        pending.corners.push({ position: pos.clone(), mesh: cornerMesh });
+        const count = pendingCornersRef.current.length;
+        setPendingCount(count);
 
-        if (pending.corners.length === 4) {
-            // Remove preview lines from scene before reset
-            if (pending.previewLines) {
-                scene.remove(pending.previewLines);
-                pending.previewLines = null;
-            }
-            // Find selected model definition
+        if (count === 4) {
+            // ── Quad complete ──────────────────────────────────────────────────────
+            // 1. Kill the preview lines completely — they belong to the pending phase
+            clearPreviewLines();
+
+            // 2. Build the finished quad
             const modelDef =
                 MODELS.find((m) => m.id === selectedModelIdRef.current) ??
                 MODELS[0];
-            finaliseQuad([...pending.corners], modelDef);
-            pendingRef.current = { corners: [], previewLines: null };
+            finaliseQuad([...pendingCornersRef.current], modelDef);
+
+            // 3. Reset pending state
+            pendingCornersRef.current = [];
             setPendingCount(0);
         } else {
-            // Draw dashed preview through placed corners
-            if (pending.corners.length >= 2) {
-                const ppts = pending.corners.map((c) => c.position);
-                const pGeo = buildPreviewGeo(THREE, ppts);
-                const pMat = new THREE.LineDashedMaterial({
-                    color: PREVIEW_COLOR,
-                    dashSize: 0.03,
-                    gapSize: 0.02,
-                });
-                const lines = new THREE.LineSegments(pGeo, pMat);
-                lines.computeLineDistances();
-                scene.add(lines);
-                pending.previewLines = lines;
-            }
-            setPendingCount(pending.corners.length);
+            // ── Still collecting corners — update dashed preview ──────────────────
+            // The reticle's current position is the "next" point user is aiming at,
+            // so just rebuild lines through the placed corners (no extra moving point yet;
+            // the frame loop will extend it to the live reticle on the next frame).
+            rebuildPreviewLines();
         }
-    }, [placeCornerMesh, finaliseQuad]);
+    }, [placeCornerMesh, clearPreviewLines, rebuildPreviewLines, finaliseQuad]);
 
     // ── XR frame loop ────────────────────────────────────────────────────────────
 
@@ -570,9 +570,7 @@ export default function ARMeasure() {
 
     onXRFrameRef.current = (_t: number, frame: XRFrame) => {
         const session = frame.session;
-        rafHandleRef.current = session.requestAnimationFrame(
-            onXRFrameRef.current,
-        );
+        session.requestAnimationFrame(onXRFrameRef.current);
 
         const renderer = rendererRef.current;
         const scene = sceneRef.current;
@@ -598,43 +596,43 @@ export default function ARMeasure() {
                     reticle.visible = true;
                     reticle.matrix.fromArray(hitPose.transform.matrix);
 
-                    // Extend live preview line to reticle position — only while corners are pending
-                    const pending = pendingRef.current;
-                    if (pending.corners.length === 0) {
-                        // No pending corners — make sure no stale preview lines exist
-                        if (pending.previewLines) {
-                            scene.remove(pending.previewLines);
-                            pending.previewLines = null;
+                    const corners = pendingCornersRef.current;
+
+                    if (corners.length === 0) {
+                        // No pending corners — ensure no stale preview line lingers
+                        if (previewLinesRef.current) {
+                            scene.remove(previewLinesRef.current);
+                            previewLinesRef.current.geometry.dispose();
+                            previewLinesRef.current = null;
                         }
-                    } else if (pending.corners.length >= 1) {
+                    } else {
+                        // Extend the dashed preview line from placed corners to live reticle
                         const THREE = window.THREE;
                         const rPos = new THREE.Vector3().setFromMatrixPosition(
                             new THREE.Matrix4().fromArray(
                                 hitPose.transform.matrix,
                             ),
                         );
-                        const ppts = [
-                            ...pending.corners.map((c) => c.position),
-                            rPos,
-                        ];
-                        if (pending.previewLines) {
-                            pending.previewLines.geometry.dispose();
-                            pending.previewLines.geometry = buildPreviewGeo(
+                        const pts = [...corners.map((c) => c.position), rPos];
+
+                        if (previewLinesRef.current) {
+                            previewLinesRef.current.geometry.dispose();
+                            previewLinesRef.current.geometry = buildPreviewGeo(
                                 THREE,
-                                ppts,
+                                pts,
                             );
-                            pending.previewLines.computeLineDistances();
+                            previewLinesRef.current.computeLineDistances();
                         } else {
-                            const pGeo = buildPreviewGeo(THREE, ppts);
-                            const pMat = new THREE.LineDashedMaterial({
-                                color: PREVIEW_COLOR,
+                            const geo = buildPreviewGeo(THREE, pts);
+                            const mat = new THREE.LineDashedMaterial({
+                                color: 0x00e5ff,
                                 dashSize: 0.03,
                                 gapSize: 0.02,
                             });
-                            const lines = new THREE.LineSegments(pGeo, pMat);
-                            lines.computeLineDistances();
-                            scene.add(lines);
-                            pending.previewLines = lines;
+                            const line = new THREE.LineSegments(geo, mat);
+                            line.computeLineDistances();
+                            scene.add(line);
+                            previewLinesRef.current = line;
                         }
                     }
                 }
@@ -669,6 +667,7 @@ export default function ARMeasure() {
             xrSessionRef.current = null;
             setSessionActive(false);
         });
+
         session.addEventListener('select', onSelect);
 
         const viewerSpace = await session.requestReferenceSpace('viewer');
@@ -680,9 +679,7 @@ export default function ARMeasure() {
         const refSpace = await session.requestReferenceSpace('local');
         xrRefSpaceRef.current = refSpace;
 
-        rafHandleRef.current = session.requestAnimationFrame(
-            onXRFrameRef.current,
-        );
+        session.requestAnimationFrame(onXRFrameRef.current);
         setSessionActive(true);
     }, [initThree, onSelect]);
 
@@ -697,6 +694,8 @@ export default function ARMeasure() {
     const clearAll = useCallback(() => {
         const scene = sceneRef.current;
         if (!scene) return;
+
+        // Remove all finished quads
         quadsRef.current.forEach((q) => {
             scene.remove(q.edgeLines);
             q.corners.forEach((c) => scene.remove(c.mesh));
@@ -705,56 +704,58 @@ export default function ARMeasure() {
         });
         quadsRef.current = [];
         setQuadCount(0);
-        const p = pendingRef.current;
-        p.corners.forEach((c) => scene.remove(c.mesh));
-        if (p.previewLines) scene.remove(p.previewLines);
-        pendingRef.current = { corners: [], previewLines: null };
+
+        // Remove pending corners
+        pendingCornersRef.current.forEach((c) => scene.remove(c.mesh));
+        pendingCornersRef.current = [];
         setPendingCount(0);
+
+        // Remove preview lines
+        if (previewLinesRef.current) {
+            scene.remove(previewLinesRef.current);
+            previewLinesRef.current.geometry.dispose();
+            previewLinesRef.current = null;
+        }
     }, []);
 
     // ── Undo last corner ─────────────────────────────────────────────────────────
 
     const undoCorner = useCallback(() => {
         const scene = sceneRef.current;
-        const pending = pendingRef.current;
-        if (!scene || pending.corners.length === 0) return;
-        const last = pending.corners.pop()!;
+        if (!scene || pendingCornersRef.current.length === 0) return;
+
+        const last = pendingCornersRef.current.pop()!;
         scene.remove(last.mesh);
-        if (pending.previewLines) {
-            scene.remove(pending.previewLines);
-            pending.previewLines = null;
+
+        // Rebuild preview without the removed corner
+        // (rebuildPreviewLines with no extraPt — frame loop will extend to reticle)
+        if (pendingCornersRef.current.length < 1) {
+            // No corners left — kill preview entirely
+            if (previewLinesRef.current) {
+                scene.remove(previewLinesRef.current);
+                previewLinesRef.current.geometry.dispose();
+                previewLinesRef.current = null;
+            }
         }
-        if (pending.corners.length >= 2) {
-            const THREE = window.THREE;
-            const ppts = pending.corners.map((c) => c.position);
-            const pGeo = buildPreviewGeo(THREE, ppts);
-            const pMat = new THREE.LineDashedMaterial({
-                color: PREVIEW_COLOR,
-                dashSize: 0.03,
-                gapSize: 0.02,
-            });
-            const lines = new THREE.LineSegments(pGeo, pMat);
-            lines.computeLineDistances();
-            scene.add(lines);
-            pending.previewLines = lines;
-        }
-        setPendingCount(pending.corners.length);
+        // else: frame loop will naturally rebuild next frame
+
+        setPendingCount(pendingCornersRef.current.length);
     }, []);
 
-    // ── Derived UI values ────────────────────────────────────────────────────────
+    // ── Derived hint ─────────────────────────────────────────────────────────────
+    // pendingCount = how many corners have been placed already (0–3)
 
-    const selectedModel = MODELS.find((m) => m.id === selectedModelId)!;
+    const selectedModel =
+        MODELS.find((m) => m.id === selectedModelId) ?? MODELS[0];
 
-    // pendingCount = number of corners already placed (0–3)
-    // Show which corner to tap NEXT
     const hintMsg =
         pendingCount === 0
-            ? `Select a model below, then tap corner 1`
+            ? `Pick a model, then tap corner 1`
             : pendingCount === 1
               ? `Tap corner 2 of 4`
               : pendingCount === 2
                 ? `Tap corner 3 of 4`
-                : `Tap corner 4 of 4 — ${selectedModel.icon} will appear!`;
+                : `Tap corner 4 of 4 — closes the quad!`;
 
     // ── Render ───────────────────────────────────────────────────────────────────
 
@@ -795,7 +796,7 @@ export default function ARMeasure() {
                         'env(safe-area-inset-top,16px) 16px env(safe-area-inset-bottom,12px)',
                 }}
             >
-                {/* ── Top bar ── */}
+                {/* Top bar */}
                 {sessionActive && (
                     <div
                         style={{
@@ -818,7 +819,7 @@ export default function ARMeasure() {
                         <div
                             style={glass({
                                 display: 'flex',
-                                gap: 16,
+                                gap: 14,
                                 fontSize: 12,
                                 alignItems: 'center',
                             })}
@@ -831,7 +832,7 @@ export default function ARMeasure() {
                                 </span>
                             )}
                             <span>
-                                <span style={{ color: '#555' }}>Placed </span>
+                                <span style={{ color: '#555' }}>Quads </span>
                                 <b style={{ color: '#fff' }}>{quadCount}</b>
                             </span>
                             <span style={{ color: '#222' }}>│</span>
@@ -852,15 +853,9 @@ export default function ARMeasure() {
                     </div>
                 )}
 
-                {/* ── Middle hint ── */}
+                {/* Middle hint */}
                 {sessionActive && (
-                    <div
-                        style={{
-                            display: 'flex',
-                            justifyContent: 'center',
-                            pointerEvents: 'none',
-                        }}
-                    >
+                    <div style={{ display: 'flex', justifyContent: 'center' }}>
                         <div
                             style={glass({
                                 fontSize: 12,
@@ -875,7 +870,7 @@ export default function ARMeasure() {
                     </div>
                 )}
 
-                {/* ── Bottom: model toolbar + controls ── */}
+                {/* Bottom: model toolbar + action buttons */}
                 {sessionActive && (
                     <div
                         style={{
@@ -886,13 +881,13 @@ export default function ARMeasure() {
                             alignItems: 'center',
                         }}
                     >
-                        {/* Model picker toolbar */}
+                        {/* Model picker */}
                         <div
                             style={{
                                 display: 'flex',
                                 gap: 8,
                                 padding: '8px 10px',
-                                background: 'rgba(0,0,0,0.7)',
+                                background: 'rgba(0,0,0,0.72)',
                                 backdropFilter: 'blur(16px)',
                                 border: '1px solid rgba(255,255,255,0.07)',
                                 borderRadius: 18,
@@ -918,7 +913,6 @@ export default function ARMeasure() {
                                                 : '1.5px solid transparent',
                                             borderRadius: 12,
                                             cursor: 'pointer',
-                                            transition: 'all 0.15s',
                                             minWidth: 56,
                                         }}
                                     >
@@ -978,7 +972,7 @@ export default function ARMeasure() {
                 )}
             </div>
 
-            {/* ── Landing screen ── */}
+            {/* Landing screen */}
             {!sessionActive && (
                 <div
                     style={{
@@ -992,7 +986,6 @@ export default function ARMeasure() {
                         padding: 24,
                     }}
                 >
-                    {/* Title */}
                     <div style={{ textAlign: 'center' }}>
                         <h1
                             style={{
@@ -1021,8 +1014,14 @@ export default function ARMeasure() {
                         </p>
                     </div>
 
-                    {/* Model preview strip */}
-                    <div style={{ display: 'flex', gap: 10 }}>
+                    <div
+                        style={{
+                            display: 'flex',
+                            gap: 10,
+                            flexWrap: 'wrap',
+                            justifyContent: 'center',
+                        }}
+                    >
                         {MODELS.map((m) => (
                             <div
                                 key={m.id}
@@ -1052,7 +1051,6 @@ export default function ARMeasure() {
                         ))}
                     </div>
 
-                    {/* Status */}
                     <div
                         style={glass({
                             maxWidth: 300,
@@ -1070,7 +1068,6 @@ export default function ARMeasure() {
                             'Immersive AR not supported on this device.'}
                     </div>
 
-                    {/* CTA */}
                     {arSupported && (
                         <button
                             onClick={startAR}
@@ -1093,7 +1090,6 @@ export default function ARMeasure() {
                         </button>
                     )}
 
-                    {/* Instructions */}
                     {arSupported && (
                         <div
                             style={{
@@ -1106,12 +1102,12 @@ export default function ARMeasure() {
                         >
                             {(
                                 [
-                                    ['01', 'Pick a model from the toolbar'],
-                                    ['02', 'Tap 4 corners on a wall or floor'],
-                                    ['03', 'The model fits automatically'],
-                                    ['04', 'Switch models and add more'],
-                                ] as [string, string][]
-                            ).map(([n, t]) => (
+                                    'Pick a model from the toolbar',
+                                    'Tap 4 corners to trace the area',
+                                    'Model loads and fits automatically',
+                                    'Switch models to place more',
+                                ] as string[]
+                            ).map((t, i) => (
                                 <div
                                     key={t}
                                     style={{
@@ -1128,7 +1124,7 @@ export default function ARMeasure() {
                                             flexShrink: 0,
                                         }}
                                     >
-                                        {n}
+                                        0{i + 1}
                                     </span>
                                     <span>{t}</span>
                                 </div>
