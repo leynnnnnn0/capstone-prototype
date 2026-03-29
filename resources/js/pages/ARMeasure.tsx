@@ -214,32 +214,61 @@ function fitModelToQuad(
     group: THREE.Group,
     pts: THREE.Vector3[],
 ): void {
+    // ── Step 1: build the quad's local coordinate frame ──────────────────────
+    // edgeX  = direction along the bottom edge (pts[0] → pts[1])
+    // edgeY  = direction along the left edge   (pts[0] → pts[3])
+    // normal = wall normal (points toward the camera / out of the wall)
+    const edgeX = new THREE.Vector3().subVectors(pts[1], pts[0]).normalize();
+    const edgeY = new THREE.Vector3().subVectors(pts[3], pts[0]).normalize();
+    const normal = new THREE.Vector3().crossVectors(edgeX, edgeY).normalize();
+
+    // Quad dimensions in metres
+    const quadWidth = pts[0].distanceTo(pts[1]);
+    const quadHeight = pts[0].distanceTo(pts[3]);
+
+    // Quad centre
     const centre = new THREE.Vector3()
         .add(pts[0])
         .add(pts[1])
         .add(pts[2])
         .add(pts[3])
         .multiplyScalar(0.25);
-    const quadWidth = pts[0].distanceTo(pts[1]);
-    const quadHeight = pts[0].distanceTo(pts[3]);
-    const edgeX = new THREE.Vector3().subVectors(pts[1], pts[0]).normalize();
-    const edgeY = new THREE.Vector3().subVectors(pts[3], pts[0]).normalize();
-    const normal = new THREE.Vector3().crossVectors(edgeX, edgeY).normalize();
+
+    // ── Step 2: align the group to the wall frame ─────────────────────────────
+    // Reset transform so the bounding-box measurement is in model-local space.
+    group.position.set(0, 0, 0);
+    group.rotation.set(0, 0, 0);
+    group.scale.set(1, 1, 1);
+    group.updateMatrixWorld(true);
+
+    // Measure the model's natural axis-aligned size at scale 1
+    const naturalSize = new THREE.Vector3();
+    new THREE.Box3().setFromObject(group).getSize(naturalSize);
+
+    // ── Step 3: compute per-axis scale so the model EXACTLY fills the quad ───
+    // X scale  → fills quad width  (naturalSize.x is the model's width axis)
+    // Y scale  → fills quad height (naturalSize.y is the model's height axis)
+    // Z scale  → use the SMALLER of scaleX/scaleY so depth never protrudes
+    //            beyond the wall surface.  Change to Math.max if you want the
+    //            depth to stay proportional to the larger dimension instead.
+    const scaleX = quadWidth / (naturalSize.x || 1);
+    const scaleY = quadHeight / (naturalSize.y || 1);
+    const scaleZ = Math.min(scaleX, scaleY); // ← key fix: no Z overflow
+
+    group.scale.set(scaleX, scaleY, scaleZ);
+
+    // ── Step 4: orient the group so its X/Y/Z align with the wall frame ──────
     group.setRotationFromMatrix(
         new THREE.Matrix4().makeBasis(edgeX, edgeY, normal),
     );
-    group.position.set(0, 0, 0);
-    group.scale.set(1, 1, 1);
+
+    // ── Step 5: translate so the model centre lands exactly on the quad centre
     group.updateMatrixWorld(true);
-    const size = new THREE.Vector3();
-    new THREE.Box3().setFromObject(group).getSize(size);
-    const scaleX = quadWidth / (size.x || 1);
-    const scaleY = quadHeight / (size.y || 1);
-    group.scale.set(scaleX, scaleY, (scaleX + scaleY) / 2);
-    group.updateMatrixWorld(true);
-    const boxCentre = new THREE.Vector3();
-    new THREE.Box3().setFromObject(group).getCenter(boxCentre);
-    group.position.copy(centre.clone().sub(boxCentre).add(group.position));
+    const scaledCentre = new THREE.Vector3();
+    new THREE.Box3().setFromObject(group).getCenter(scaledCentre);
+    // shift by the difference between where the model currently sits and where
+    // we want it (the quad centre)
+    group.position.add(centre.clone().sub(scaledCentre));
 }
 
 async function renderThumbnail(
