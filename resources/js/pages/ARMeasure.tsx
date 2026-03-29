@@ -20,7 +20,6 @@ declare global {
 interface ModelDef {
     id: string;
     label: string;
-    icon: string;
     file: string;
     accentColor: string;
 }
@@ -43,6 +42,21 @@ interface QuadGroup {
     edgeLines: THREE.LineSegments;
     labelData: LabelData[];
     modelRoot: THREE.Group | null;
+    // raw measurements in metres
+    widthM: number;
+    heightM: number;
+    confirmed: boolean;
+}
+
+export interface QuadSummary {
+    modelLabel: string;
+    widthCm: number;
+    heightCm: number;
+}
+
+interface Props {
+    /** Called when user taps "Done" — receives list of all confirmed placements */
+    onComplete?: (results: QuadSummary[]) => void;
 }
 
 // ─── Model catalogue ──────────────────────────────────────────────────────────
@@ -51,28 +65,24 @@ const MODELS: ModelDef[] = [
     {
         id: 'window',
         label: 'Window',
-        icon: '🪟',
         file: '/models/window.glb',
         accentColor: '#00e5ff',
     },
     {
         id: 'window1',
         label: 'Window 1',
-        icon: '🔲',
         file: '/models/window1.glb',
         accentColor: '#4fc3f7',
     },
     {
         id: 'door1',
         label: 'Door 1',
-        icon: '🚪',
         file: '/models/door1.glb',
         accentColor: '#ffd740',
     },
     {
         id: 'door2',
         label: 'Door 2',
-        icon: '🏠',
         file: '/models/door2.glb',
         accentColor: '#ff6e40',
     },
@@ -212,42 +222,78 @@ function fitModelToQuad(
         .add(pts[2])
         .add(pts[3])
         .multiplyScalar(0.25);
-
     const quadWidth = pts[0].distanceTo(pts[1]);
     const quadHeight = pts[0].distanceTo(pts[3]);
-
     const edgeX = new THREE.Vector3().subVectors(pts[1], pts[0]).normalize();
     const edgeY = new THREE.Vector3().subVectors(pts[3], pts[0]).normalize();
     const normal = new THREE.Vector3().crossVectors(edgeX, edgeY).normalize();
-
     group.setRotationFromMatrix(
         new THREE.Matrix4().makeBasis(edgeX, edgeY, normal),
     );
-
-    // First pass: measure bounding box
     group.position.set(0, 0, 0);
     group.scale.set(1, 1, 1);
     group.updateMatrixWorld(true);
     const size = new THREE.Vector3();
     new THREE.Box3().setFromObject(group).getSize(size);
-
-    // Non-uniform stretch: X fills quad width, Y fills quad height, Z averaged
     const scaleX = quadWidth / (size.x || 1);
     const scaleY = quadHeight / (size.y || 1);
-    const scaleZ = (scaleX + scaleY) / 2;
-    group.scale.set(scaleX, scaleY, scaleZ);
-
-    // Re-centre on quad after scale
+    group.scale.set(scaleX, scaleY, (scaleX + scaleY) / 2);
     group.updateMatrixWorld(true);
     const boxCentre = new THREE.Vector3();
     new THREE.Box3().setFromObject(group).getCenter(boxCentre);
-    // boxCentre is world position of model centre; shift group.position so it lands on quad centre
     group.position.copy(centre.clone().sub(boxCentre).add(group.position));
+}
+
+/** Render a GLB file into a small canvas thumbnail. Returns a data-URL or null on error. */
+async function renderThumbnail(
+    file: string,
+    size = 120,
+): Promise<string | null> {
+    try {
+        const THREE = window.THREE;
+        const offCanvas = document.createElement('canvas');
+        offCanvas.width = size;
+        offCanvas.height = size;
+        const renderer = new THREE.WebGLRenderer({
+            canvas: offCanvas,
+            alpha: true,
+            antialias: true,
+        });
+        renderer.setSize(size, size);
+        (renderer as any).outputEncoding = (THREE as any).sRGBEncoding;
+        const scene = new THREE.Scene();
+        scene.add(new THREE.HemisphereLight(0xffffff, 0x8899aa, 1.5));
+        const dir = new THREE.DirectionalLight(0xffffff, 1);
+        dir.position.set(1, 2, 2);
+        scene.add(dir);
+        const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 100);
+
+        const gltf = await new Promise<{ scene: THREE.Group }>((res, rej) => {
+            new THREE.GLTFLoader().load(file, res, undefined, rej);
+        });
+
+        const model = gltf.scene;
+        scene.add(model);
+        const box = new THREE.Box3().setFromObject(model);
+        const centre = new THREE.Vector3();
+        box.getCenter(centre);
+        const sphere = new THREE.Sphere();
+        box.getBoundingSphere(sphere);
+        model.position.sub(centre);
+        camera.position.set(0, 0, sphere.radius * 2.2);
+        camera.lookAt(0, 0, 0);
+        renderer.render(scene, camera);
+        const url = offCanvas.toDataURL();
+        renderer.dispose();
+        return url;
+    } catch {
+        return null;
+    }
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function ARMeasure() {
+export default function ARMeasure({ onComplete }: Props) {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const overlayRef = useRef<HTMLDivElement>(null);
 
@@ -263,35 +309,38 @@ export default function ARMeasure() {
     const reticleRef = useRef<THREE.Mesh | null>(null);
     const threeLoadedRef = useRef(false);
 
-    // ── Pending corners — flat independent refs, never replaced as objects ──────
-    // This is the key fix: frame loop and onSelect both mutate THE SAME arrays/refs,
-    // no object replacement that could cause one side to see a stale reference.
-    const pendingCornersRef = useRef<CornerPoint[]>([]); // corners placed so far
-    const previewLinesRef = useRef<THREE.LineSegments | null>(null); // live dashed line
+    // Pending corners
+    const pendingCornersRef = useRef<CornerPoint[]>([]);
+    const previewLinesRef = useRef<THREE.LineSegments | null>(null);
 
-    // Completed quads
+    // Quads
     const quadsRef = useRef<QuadGroup[]>([]);
     const quadCounterRef = useRef(0);
 
-    // ── UI touch guard — prevents toolbar taps from firing onSelect ─────────────
-    // WebXR's "select" event fires for ALL screen taps. We track whether the touch
-    // landed on a UI element and skip onSelect if so.
+    // UI touch guard
     const uiTouchedRef = useRef(false);
 
-    // Selected model — ref keeps it fresh inside the XR frame callback
+    // Selected model ref (always fresh in XR callbacks)
     const selectedModelIdRef = useRef<string>(MODELS[0].id);
 
-    // UI state (React)
+    // UI state
     const [arSupported, setArSupported] = useState<boolean | null>(null);
     const [sessionActive, setSessionActive] = useState(false);
-    const [pendingCount, setPendingCount] = useState(0); // mirrors pendingCornersRef.length
+    const [pendingCount, setPendingCount] = useState(0);
     const [quadCount, setQuadCount] = useState(0);
     const [selectedModelId, setSelectedModelId] = useState<string>(
         MODELS[0].id,
     );
     const [loadingModel, setLoadingModel] = useState(false);
+    // ID of the most recently placed (unconfirmed) quad — for model swapping
+    const [activeQuadId, setActiveQuadId] = useState<number | null>(null);
+    // Thumbnails: modelId → data-URL
+    const [thumbs, setThumbs] = useState<Record<string, string>>({});
+    // Summary shown after session ends
+    const [summary, setSummary] = useState<QuadSummary[]>([]);
+    const [showSummary, setShowSummary] = useState(false);
 
-    // Keep model ref in sync with state
+    // Keep model ref in sync
     useEffect(() => {
         selectedModelIdRef.current = selectedModelId;
     }, [selectedModelId]);
@@ -309,7 +358,7 @@ export default function ARMeasure() {
             .catch(() => setArSupported(false));
     }, []);
 
-    // ── Init Three.js + GLTFLoader ───────────────────────────────────────────────
+    // ── Init Three.js + generate thumbnails ─────────────────────────────────────
 
     const initThree = useCallback(async (canvas: HTMLCanvasElement) => {
         if (threeLoadedRef.current) return;
@@ -340,9 +389,11 @@ export default function ARMeasure() {
         const sun = new THREE.DirectionalLight(0xffffff, 1.0);
         sun.position.set(1, 2, 1.5);
         scene.add(sun);
-        const fill = new THREE.DirectionalLight(0xffffff, 0.4);
-        fill.position.set(-1, 0.5, -1);
-        scene.add(fill);
+        scene.add(
+            Object.assign(new THREE.DirectionalLight(0xffffff, 0.4), {
+                position: new THREE.Vector3(-1, 0.5, -1),
+            }),
+        );
 
         const camera = new THREE.PerspectiveCamera(
             70,
@@ -352,8 +403,8 @@ export default function ARMeasure() {
         );
         cameraRef.current = camera;
 
-        // Reticle
-        const rGeo = new THREE.RingGeometry(0.04, 0.06, 32);
+        // Reticle: ring + crosshair lines drawn in CSS (see JSX)
+        const rGeo = new THREE.RingGeometry(0.04, 0.055, 32);
         rGeo.applyMatrix4(new THREE.Matrix4().makeRotationX(-Math.PI / 2));
         const rMat = new THREE.MeshBasicMaterial({
             color: 0x00e5ff,
@@ -372,10 +423,17 @@ export default function ARMeasure() {
             camera.aspect = window.innerWidth / window.innerHeight;
             camera.updateProjectionMatrix();
         });
+
+        // Generate thumbnails after Three.js is ready (best-effort)
+        const thumbMap: Record<string, string> = {};
+        for (const m of MODELS) {
+            const url = await renderThumbnail(m.file);
+            if (url) thumbMap[m.id] = url;
+        }
+        if (Object.keys(thumbMap).length > 0) setThumbs(thumbMap);
     }, []);
 
-    // ── Remove preview lines from scene completely ───────────────────────────────
-    // Single function used by BOTH onSelect and the frame loop — no duplication
+    // ── Remove preview lines ─────────────────────────────────────────────────────
 
     const clearPreviewLines = useCallback(() => {
         if (previewLinesRef.current && sceneRef.current) {
@@ -385,48 +443,7 @@ export default function ARMeasure() {
         }
     }, []);
 
-    // ── Rebuild preview lines from current pending corners + optional extra pt ──
-
-    const rebuildPreviewLines = useCallback(
-        (extraPt?: THREE.Vector3) => {
-            const scene = sceneRef.current;
-            const corners = pendingCornersRef.current;
-            if (!scene) return;
-
-            const THREE = window.THREE;
-
-            // Need at least 1 corner + the moving reticle point to draw anything
-            const pts = [
-                ...corners.map((c) => c.position),
-                ...(extraPt ? [extraPt] : []),
-            ];
-            if (pts.length < 2) {
-                clearPreviewLines();
-                return;
-            }
-
-            if (previewLinesRef.current) {
-                // Reuse existing LineSegments object — just swap geometry
-                previewLinesRef.current.geometry.dispose();
-                previewLinesRef.current.geometry = buildPreviewGeo(THREE, pts);
-                previewLinesRef.current.computeLineDistances();
-            } else {
-                const geo = buildPreviewGeo(THREE, pts);
-                const mat = new THREE.LineDashedMaterial({
-                    color: 0x00e5ff,
-                    dashSize: 0.03,
-                    gapSize: 0.02,
-                });
-                const line = new THREE.LineSegments(geo, mat);
-                line.computeLineDistances();
-                scene.add(line);
-                previewLinesRef.current = line;
-            }
-        },
-        [clearPreviewLines],
-    );
-
-    // ── Place a corner sphere in the scene ──────────────────────────────────────
+    // ── Place corner sphere ──────────────────────────────────────────────────────
 
     const placeCornerMesh = useCallback((pos: THREE.Vector3): THREE.Mesh => {
         const THREE = window.THREE;
@@ -442,16 +459,23 @@ export default function ARMeasure() {
         return mesh;
     }, []);
 
-    // ── Load GLB and fit to quad ─────────────────────────────────────────────────
+    // ── Load GLB, fit to quad, optionally replace existing model ─────────────────
 
     const loadAndPlaceModel = useCallback(
-        (modelDef: ModelDef, pts: THREE.Vector3[], quadId: number) => {
+        (
+            modelDef: ModelDef,
+            pts: THREE.Vector3[],
+            quadId: number,
+            replacingGroup?: THREE.Group | null,
+        ) => {
             const scene = sceneRef.current;
             if (!scene) return;
             setLoadingModel(true);
 
-            const loader = new window.THREE.GLTFLoader();
-            loader.load(
+            // Remove old model if swapping
+            if (replacingGroup) scene.remove(replacingGroup);
+
+            new window.THREE.GLTFLoader().load(
                 modelDef.file,
                 (gltf) => {
                     setLoadingModel(false);
@@ -459,19 +483,22 @@ export default function ARMeasure() {
                     fitModelToQuad(window.THREE, group, pts);
                     scene.add(group);
                     const quad = quadsRef.current.find((q) => q.id === quadId);
-                    if (quad) quad.modelRoot = group;
+                    if (quad) {
+                        quad.modelRoot = group;
+                        quad.modelId = modelDef.id;
+                    }
                 },
                 undefined,
                 (err) => {
                     setLoadingModel(false);
-                    console.error('GLTFLoader error:', err);
+                    console.error('GLTFLoader:', err);
                 },
             );
         },
         [],
     );
 
-    // ── Finalise quad from 4 corners ────────────────────────────────────────────
+    // ── Finalise quad ────────────────────────────────────────────────────────────
 
     const finaliseQuad = useCallback(
         (corners: CornerPoint[], modelDef: ModelDef) => {
@@ -479,7 +506,6 @@ export default function ARMeasure() {
             const scene = sceneRef.current!;
             const pts = corners.map((c) => c.position);
 
-            // Permanent edge outline
             const edgeMat = new THREE.LineBasicMaterial({
                 color: 0xffffff,
                 transparent: true,
@@ -491,11 +517,10 @@ export default function ARMeasure() {
             );
             scene.add(edgeLines);
 
-            // Side-length labels
             const labelData: LabelData[] = [];
             for (let i = 0; i < 4; i++) {
-                const a = pts[i];
-                const b = pts[(i + 1) % 4];
+                const a = pts[i],
+                    b = pts[(i + 1) % 4];
                 const mid = new THREE.Vector3()
                     .addVectors(a, b)
                     .multiplyScalar(0.5);
@@ -510,7 +535,10 @@ export default function ARMeasure() {
                 labelData.push(label);
             }
 
+            const widthM = pts[0].distanceTo(pts[1]);
+            const heightM = pts[0].distanceTo(pts[3]);
             const quadId = ++quadCounterRef.current;
+
             quadsRef.current.push({
                 id: quadId,
                 modelId: modelDef.id,
@@ -518,18 +546,44 @@ export default function ARMeasure() {
                 edgeLines,
                 labelData,
                 modelRoot: null,
+                widthM,
+                heightM,
+                confirmed: false,
             });
             setQuadCount(quadsRef.current.length);
+            setActiveQuadId(quadId);
 
             loadAndPlaceModel(modelDef, pts, quadId);
         },
         [loadAndPlaceModel],
     );
 
-    // ── onSelect: called on every tap ───────────────────────────────────────────
+    // ── Swap model on the active (unconfirmed) quad ──────────────────────────────
+
+    const swapActiveModel = useCallback(
+        (modelDef: ModelDef) => {
+            const quad = quadsRef.current.find((q) => !q.confirmed);
+            if (!quad) return;
+            const pts = quad.corners.map((c) => c.position);
+            loadAndPlaceModel(modelDef, pts, quad.id, quad.modelRoot);
+        },
+        [loadAndPlaceModel],
+    );
+
+    // ── Confirm active quad → lock it, ready for next ───────────────────────────
+
+    const confirmActiveQuad = useCallback(() => {
+        const quad = quadsRef.current.find((q) => !q.confirmed);
+        if (!quad) return;
+        quad.confirmed = true;
+        // Dim the edge lines to show it's locked
+        (quad.edgeLines.material as THREE.LineBasicMaterial).opacity = 0.25;
+        setActiveQuadId(null);
+    }, []);
+
+    // ── onSelect ─────────────────────────────────────────────────────────────────
 
     const onSelect = useCallback(() => {
-        // If the touch originated on a UI button, ignore it
         if (uiTouchedRef.current) {
             uiTouchedRef.current = false;
             return;
@@ -539,13 +593,15 @@ export default function ARMeasure() {
         const scene = sceneRef.current;
         if (!reticle?.visible || !scene) return;
 
+        // Block tapping while there is an unconfirmed quad waiting
+        const hasUnconfirmed = quadsRef.current.some((q) => !q.confirmed);
+        if (hasUnconfirmed) return;
+
         const THREE = window.THREE;
+        const pos = new THREE.Vector3().setFromMatrixPosition(
+            new THREE.Matrix4().fromArray(reticle.matrix.elements),
+        );
 
-        // World position of the reticle hit point
-        const mat4 = new THREE.Matrix4().fromArray(reticle.matrix.elements);
-        const pos = new THREE.Vector3().setFromMatrixPosition(mat4);
-
-        // Place corner sphere
         const mesh = placeCornerMesh(pos);
         pendingCornersRef.current.push({ position: pos.clone(), mesh });
 
@@ -553,35 +609,22 @@ export default function ARMeasure() {
         setPendingCount(count);
 
         if (count === 4) {
-            // ── Quad complete ──────────────────────────────────────────────────────
-            // 1. Kill the preview lines completely — they belong to the pending phase
             clearPreviewLines();
-
-            // 2. Build the finished quad
             const modelDef =
                 MODELS.find((m) => m.id === selectedModelIdRef.current) ??
                 MODELS[0];
             finaliseQuad([...pendingCornersRef.current], modelDef);
-
-            // 3. Reset pending state
             pendingCornersRef.current = [];
             setPendingCount(0);
-        } else {
-            // ── Still collecting corners — update dashed preview ──────────────────
-            // The reticle's current position is the "next" point user is aiming at,
-            // so just rebuild lines through the placed corners (no extra moving point yet;
-            // the frame loop will extend it to the live reticle on the next frame).
-            rebuildPreviewLines();
         }
-    }, [placeCornerMesh, clearPreviewLines, rebuildPreviewLines, finaliseQuad]);
+    }, [placeCornerMesh, clearPreviewLines, finaliseQuad]);
 
     // ── XR frame loop ────────────────────────────────────────────────────────────
 
     const onXRFrameRef = useRef<(t: number, frame: XRFrame) => void>(null!);
 
     onXRFrameRef.current = (_t: number, frame: XRFrame) => {
-        const session = frame.session;
-        session.requestAnimationFrame(onXRFrameRef.current);
+        frame.session.requestAnimationFrame(onXRFrameRef.current);
 
         const renderer = rendererRef.current;
         const scene = sceneRef.current;
@@ -608,16 +651,13 @@ export default function ARMeasure() {
                     reticle.matrix.fromArray(hitPose.transform.matrix);
 
                     const corners = pendingCornersRef.current;
-
                     if (corners.length === 0) {
-                        // No pending corners — ensure no stale preview line lingers
                         if (previewLinesRef.current) {
                             scene.remove(previewLinesRef.current);
                             previewLinesRef.current.geometry.dispose();
                             previewLinesRef.current = null;
                         }
                     } else {
-                        // Extend the dashed preview line from placed corners to live reticle
                         const THREE = window.THREE;
                         const rPos = new THREE.Vector3().setFromMatrixPosition(
                             new THREE.Matrix4().fromArray(
@@ -625,7 +665,6 @@ export default function ARMeasure() {
                             ),
                         );
                         const pts = [...corners.map((c) => c.position), rPos];
-
                         if (previewLinesRef.current) {
                             previewLinesRef.current.geometry.dispose();
                             previewLinesRef.current.geometry = buildPreviewGeo(
@@ -634,13 +673,14 @@ export default function ARMeasure() {
                             );
                             previewLinesRef.current.computeLineDistances();
                         } else {
-                            const geo = buildPreviewGeo(THREE, pts);
-                            const mat = new THREE.LineDashedMaterial({
-                                color: 0x00e5ff,
-                                dashSize: 0.03,
-                                gapSize: 0.02,
-                            });
-                            const line = new THREE.LineSegments(geo, mat);
+                            const line = new THREE.LineSegments(
+                                buildPreviewGeo(THREE, pts),
+                                new THREE.LineDashedMaterial({
+                                    color: 0x00e5ff,
+                                    dashSize: 0.03,
+                                    gapSize: 0.02,
+                                }),
+                            );
                             line.computeLineDistances();
                             scene.add(line);
                             previewLinesRef.current = line;
@@ -657,6 +697,8 @@ export default function ARMeasure() {
 
     const startAR = useCallback(async () => {
         if (!canvasRef.current) return;
+        setShowSummary(false);
+        setSummary([]);
         await initThree(canvasRef.current);
 
         const session = await navigator.xr!.requestSession('immersive-ar', {
@@ -678,26 +720,56 @@ export default function ARMeasure() {
             xrSessionRef.current = null;
             setSessionActive(false);
         });
-
         session.addEventListener('select', onSelect);
 
         const viewerSpace = await session.requestReferenceSpace('viewer');
-        const hitTestSource = await session.requestHitTestSource!({
+        xrHitTestSourceRef.current = (await session.requestHitTestSource!({
             space: viewerSpace,
-        });
-        xrHitTestSourceRef.current = hitTestSource!;
-
-        const refSpace = await session.requestReferenceSpace('local');
-        xrRefSpaceRef.current = refSpace;
+        }))!;
+        xrRefSpaceRef.current = await session.requestReferenceSpace('local');
 
         session.requestAnimationFrame(onXRFrameRef.current);
         setSessionActive(true);
     }, [initThree, onSelect]);
 
-    // ── End AR ───────────────────────────────────────────────────────────────────
+    // ── End AR + compile summary ─────────────────────────────────────────────────
 
     const endAR = useCallback(async () => {
+        // Auto-confirm any unconfirmed quad before ending
+        quadsRef.current.forEach((q) => {
+            q.confirmed = true;
+        });
+        setActiveQuadId(null);
+
+        const results: QuadSummary[] = quadsRef.current.map((q) => {
+            const model = MODELS.find((m) => m.id === q.modelId) ?? MODELS[0];
+            return {
+                modelLabel: model.label,
+                widthCm: Math.round(q.widthM * 100),
+                heightCm: Math.round(q.heightM * 100),
+            };
+        });
+        setSummary(results);
+        onComplete?.(results);
+
         if (xrSessionRef.current) await xrSessionRef.current.end();
+        setShowSummary(true);
+    }, [onComplete]);
+
+    // ── Undo last corner ─────────────────────────────────────────────────────────
+
+    const undoCorner = useCallback(() => {
+        const scene = sceneRef.current;
+        if (!scene || pendingCornersRef.current.length === 0) return;
+        scene.remove(pendingCornersRef.current.pop()!.mesh);
+        if (pendingCornersRef.current.length === 0) {
+            if (previewLinesRef.current) {
+                scene.remove(previewLinesRef.current);
+                previewLinesRef.current.geometry.dispose();
+                previewLinesRef.current = null;
+            }
+        }
+        setPendingCount(pendingCornersRef.current.length);
     }, []);
 
     // ── Clear all ────────────────────────────────────────────────────────────────
@@ -705,8 +777,6 @@ export default function ARMeasure() {
     const clearAll = useCallback(() => {
         const scene = sceneRef.current;
         if (!scene) return;
-
-        // Remove all finished quads
         quadsRef.current.forEach((q) => {
             scene.remove(q.edgeLines);
             q.corners.forEach((c) => scene.remove(c.mesh));
@@ -715,13 +785,10 @@ export default function ARMeasure() {
         });
         quadsRef.current = [];
         setQuadCount(0);
-
-        // Remove pending corners
+        setActiveQuadId(null);
         pendingCornersRef.current.forEach((c) => scene.remove(c.mesh));
         pendingCornersRef.current = [];
         setPendingCount(0);
-
-        // Remove preview lines
         if (previewLinesRef.current) {
             scene.remove(previewLinesRef.current);
             previewLinesRef.current.geometry.dispose();
@@ -729,44 +796,35 @@ export default function ARMeasure() {
         }
     }, []);
 
-    // ── Undo last corner ─────────────────────────────────────────────────────────
+    // ── Model selection — swap if active quad exists, else just set for next ─────
 
-    const undoCorner = useCallback(() => {
-        const scene = sceneRef.current;
-        if (!scene || pendingCornersRef.current.length === 0) return;
+    const handleModelSelect = useCallback(
+        (id: string) => {
+            setSelectedModelId(id);
+            selectedModelIdRef.current = id;
+            const modelDef = MODELS.find((m) => m.id === id)!;
+            // If there is an unconfirmed quad, swap its model immediately
+            const unconfirmed = quadsRef.current.find((q) => !q.confirmed);
+            if (unconfirmed) swapActiveModel(modelDef);
+        },
+        [swapActiveModel],
+    );
 
-        const last = pendingCornersRef.current.pop()!;
-        scene.remove(last.mesh);
-
-        // Rebuild preview without the removed corner
-        // (rebuildPreviewLines with no extraPt — frame loop will extend to reticle)
-        if (pendingCornersRef.current.length < 1) {
-            // No corners left — kill preview entirely
-            if (previewLinesRef.current) {
-                scene.remove(previewLinesRef.current);
-                previewLinesRef.current.geometry.dispose();
-                previewLinesRef.current = null;
-            }
-        }
-        // else: frame loop will naturally rebuild next frame
-
-        setPendingCount(pendingCornersRef.current.length);
-    }, []);
-
-    // ── Derived hint ─────────────────────────────────────────────────────────────
-    // pendingCount = how many corners have been placed already (0–3)
+    // ── Derived ──────────────────────────────────────────────────────────────────
 
     const selectedModel =
         MODELS.find((m) => m.id === selectedModelId) ?? MODELS[0];
+    const hasUnconfirmed = quadsRef.current.some((q) => !q.confirmed);
 
-    const hintMsg =
-        pendingCount === 0
-            ? `Pick a model, then tap corner 1`
-            : pendingCount === 1
-              ? `Tap corner 2 of 4`
-              : pendingCount === 2
-                ? `Tap corner 3 of 4`
-                : `Tap corner 4 of 4 — closes the quad!`;
+    const hintMsg = hasUnconfirmed
+        ? `Try different models, then tap Confirm`
+        : pendingCount === 0
+          ? `Pick a model, then tap corner 1`
+          : pendingCount === 1
+            ? `Tap corner 2 of 4`
+            : pendingCount === 2
+              ? `Tap corner 3 of 4`
+              : `Tap corner 4 — quad closes!`;
 
     // ── Render ───────────────────────────────────────────────────────────────────
 
@@ -792,6 +850,62 @@ export default function ARMeasure() {
                     display: sessionActive ? 'block' : 'none',
                 }}
             />
+
+            {/* ── CSS Crosshair — always centred, pointer events off ── */}
+            {sessionActive && (
+                <div
+                    style={{
+                        position: 'absolute',
+                        inset: 0,
+                        pointerEvents: 'none',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                    }}
+                >
+                    <div
+                        style={{ position: 'relative', width: 36, height: 36 }}
+                    >
+                        {/* Horizontal bar */}
+                        <div
+                            style={{
+                                position: 'absolute',
+                                top: '50%',
+                                left: 0,
+                                right: 0,
+                                height: 1.5,
+                                background: 'rgba(255,255,255,0.85)',
+                                transform: 'translateY(-50%)',
+                            }}
+                        />
+                        {/* Vertical bar */}
+                        <div
+                            style={{
+                                position: 'absolute',
+                                left: '50%',
+                                top: 0,
+                                bottom: 0,
+                                width: 1.5,
+                                background: 'rgba(255,255,255,0.85)',
+                                transform: 'translateX(-50%)',
+                            }}
+                        />
+                        {/* Centre dot */}
+                        <div
+                            style={{
+                                position: 'absolute',
+                                top: '50%',
+                                left: '50%',
+                                width: 5,
+                                height: 5,
+                                borderRadius: '50%',
+                                background: '#00e5ff',
+                                transform: 'translate(-50%,-50%)',
+                            }}
+                        />
+                    </div>
+                </div>
+            )}
 
             {/* DOM overlay */}
             <div
@@ -849,7 +963,7 @@ export default function ARMeasure() {
                                 <span style={{ color: '#555' }}>Quads </span>
                                 <b style={{ color: '#fff' }}>{quadCount}</b>
                             </span>
-                            <span style={{ color: '#222' }}>│</span>
+                            <span style={{ color: '#333' }}>│</span>
                             <span>
                                 <span style={{ color: '#555' }}>Pts </span>
                                 <b
@@ -866,39 +980,38 @@ export default function ARMeasure() {
                         </div>
                     </div>
                 )}
-
-                {/* Spacer — keeps top bar at top, bottom section at bottom */}
-                <div />
-
-                {/* Bottom: hint + model toolbar + action buttons */}
+                <div /> {/* spacer */}
+                {/* Bottom section */}
                 {sessionActive && (
                     <div
                         style={{
                             pointerEvents: 'all',
                             display: 'flex',
                             flexDirection: 'column',
-                            gap: 10,
+                            gap: 8,
                             alignItems: 'center',
                         }}
                         onPointerDown={() => {
                             uiTouchedRef.current = true;
                         }}
                     >
-                        {/* Hint — sits just above the toolbar, well clear of the reticle */}
+                        {/* Hint */}
                         <div
                             style={glass({
-                                fontSize: 12,
-                                color: selectedModel.accentColor,
+                                fontSize: 11,
+                                color: hasUnconfirmed
+                                    ? '#ffd740'
+                                    : selectedModel.accentColor,
                                 letterSpacing: '0.05em',
                                 textAlign: 'center',
-                                maxWidth: 280,
+                                maxWidth: 300,
                                 pointerEvents: 'none',
                             })}
                         >
                             {hintMsg}
                         </div>
 
-                        {/* Model picker */}
+                        {/* Model picker with thumbnails */}
                         <div
                             style={{
                                 display: 'flex',
@@ -915,27 +1028,60 @@ export default function ARMeasure() {
                                 return (
                                     <button
                                         key={m.id}
-                                        onClick={() => setSelectedModelId(m.id)}
+                                        onClick={() => handleModelSelect(m.id)}
                                         style={{
                                             display: 'flex',
                                             flexDirection: 'column',
                                             alignItems: 'center',
-                                            gap: 3,
-                                            padding: '8px 12px',
+                                            gap: 4,
+                                            padding: '6px 8px',
                                             background: active
                                                 ? m.accentColor + '22'
                                                 : 'transparent',
                                             border: active
                                                 ? `1.5px solid ${m.accentColor}`
-                                                : '1.5px solid transparent',
+                                                : '1.5px solid rgba(255,255,255,0.06)',
                                             borderRadius: 12,
                                             cursor: 'pointer',
-                                            minWidth: 56,
+                                            minWidth: 62,
                                         }}
                                     >
-                                        <span style={{ fontSize: 22 }}>
-                                            {m.icon}
-                                        </span>
+                                        {/* Thumbnail or fallback */}
+                                        <div
+                                            style={{
+                                                width: 48,
+                                                height: 48,
+                                                borderRadius: 8,
+                                                overflow: 'hidden',
+                                                background:
+                                                    'rgba(255,255,255,0.04)',
+                                                display: 'flex',
+                                                alignItems: 'center',
+                                                justifyContent: 'center',
+                                                border: `1px solid ${active ? m.accentColor + '55' : 'transparent'}`,
+                                            }}
+                                        >
+                                            {thumbs[m.id] ? (
+                                                <img
+                                                    src={thumbs[m.id]}
+                                                    alt={m.label}
+                                                    style={{
+                                                        width: '100%',
+                                                        height: '100%',
+                                                        objectFit: 'contain',
+                                                    }}
+                                                />
+                                            ) : (
+                                                <div
+                                                    style={{
+                                                        fontSize: 22,
+                                                        opacity: 0.6,
+                                                    }}
+                                                >
+                                                    📦
+                                                </div>
+                                            )}
+                                        </div>
                                         <span
                                             style={{
                                                 fontSize: 9,
@@ -955,15 +1101,22 @@ export default function ARMeasure() {
                             })}
                         </div>
 
-                        {/* Action buttons */}
-                        <div style={{ display: 'flex', gap: 8 }}>
+                        {/* Action row */}
+                        <div
+                            style={{
+                                display: 'flex',
+                                gap: 8,
+                                flexWrap: 'wrap',
+                                justifyContent: 'center',
+                            }}
+                        >
                             <button
                                 onClick={undoCorner}
-                                disabled={pendingCount === 0}
+                                disabled={pendingCount === 0 || hasUnconfirmed}
                                 style={btn(
                                     '#111',
                                     'rgba(255,221,64,0.3)',
-                                    pendingCount === 0,
+                                    pendingCount === 0 || hasUnconfirmed,
                                 )}
                             >
                                 Undo
@@ -978,19 +1131,35 @@ export default function ARMeasure() {
                             >
                                 Clear
                             </button>
+
+                            {/* Confirm button — only visible when there's an unconfirmed quad */}
+                            {hasUnconfirmed && (
+                                <button
+                                    onClick={confirmActiveQuad}
+                                    style={btn(
+                                        '#003322',
+                                        '#00e5ff',
+                                        false,
+                                        '#00e5ff',
+                                    )}
+                                >
+                                    ✓ Confirm &amp; Next
+                                </button>
+                            )}
+
                             <button
                                 onClick={endAR}
                                 style={btn('#1a0808', '#ff5252', false)}
                             >
-                                Exit AR
+                                Done
                             </button>
                         </div>
                     </div>
                 )}
             </div>
 
-            {/* Landing screen */}
-            {!sessionActive && (
+            {/* ── Summary screen (shown after Done) ── */}
+            {showSummary && !sessionActive && (
                 <div
                     style={{
                         position: 'absolute',
@@ -999,7 +1168,130 @@ export default function ARMeasure() {
                         flexDirection: 'column',
                         alignItems: 'center',
                         justifyContent: 'center',
-                        gap: 28,
+                        gap: 20,
+                        padding: 24,
+                        background: '#08080f',
+                    }}
+                >
+                    <h2
+                        style={{
+                            margin: 0,
+                            fontSize: 20,
+                            fontWeight: 800,
+                            color: '#00e5ff',
+                            letterSpacing: '-0.01em',
+                        }}
+                    >
+                        Placement Summary
+                    </h2>
+
+                    <div
+                        style={{
+                            width: '100%',
+                            maxWidth: 360,
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: 8,
+                        }}
+                    >
+                        {summary.length === 0 && (
+                            <div
+                                style={{
+                                    color: '#444',
+                                    fontSize: 13,
+                                    textAlign: 'center',
+                                }}
+                            >
+                                No placements recorded.
+                            </div>
+                        )}
+                        {summary.map((s, i) => {
+                            const model =
+                                MODELS.find((m) => m.label === s.modelLabel) ??
+                                MODELS[0];
+                            return (
+                                <div
+                                    key={i}
+                                    style={{
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        justifyContent: 'space-between',
+                                        padding: '12px 16px',
+                                        background: 'rgba(255,255,255,0.03)',
+                                        border: `1px solid ${model.accentColor}33`,
+                                        borderRadius: 12,
+                                    }}
+                                >
+                                    <div
+                                        style={{
+                                            display: 'flex',
+                                            flexDirection: 'column',
+                                            gap: 2,
+                                        }}
+                                    >
+                                        <span
+                                            style={{
+                                                fontSize: 13,
+                                                fontWeight: 700,
+                                                color: model.accentColor,
+                                            }}
+                                        >
+                                            {s.modelLabel}
+                                        </span>
+                                        <span
+                                            style={{
+                                                fontSize: 11,
+                                                color: '#555',
+                                            }}
+                                        >
+                                            #{i + 1}
+                                        </span>
+                                    </div>
+                                    <div
+                                        style={{
+                                            fontSize: 14,
+                                            fontWeight: 700,
+                                            color: '#fff',
+                                            letterSpacing: '0.02em',
+                                        }}
+                                    >
+                                        {s.widthCm} × {s.heightCm} cm
+                                    </div>
+                                </div>
+                            );
+                        })}
+                    </div>
+
+                    <div style={{ display: 'flex', gap: 10 }}>
+                        <button
+                            onClick={() => {
+                                setShowSummary(false);
+                            }}
+                            style={btn('#111', 'rgba(255,255,255,0.12)', false)}
+                        >
+                            Back
+                        </button>
+                        <button
+                            onClick={startAR}
+                            style={btn('#001833', '#00e5ff', false, '#00e5ff')}
+                        >
+                            New Session
+                        </button>
+                    </div>
+                </div>
+            )}
+
+            {/* ── Landing screen ── */}
+            {!sessionActive && !showSummary && (
+                <div
+                    style={{
+                        position: 'absolute',
+                        inset: 0,
+                        display: 'flex',
+                        flexDirection: 'column',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        gap: 24,
                         padding: 24,
                     }}
                 >
@@ -1031,6 +1323,7 @@ export default function ARMeasure() {
                         </p>
                     </div>
 
+                    {/* Model cards with thumbnails */}
                     <div
                         style={{
                             display: 'flex',
@@ -1046,14 +1339,47 @@ export default function ARMeasure() {
                                     display: 'flex',
                                     flexDirection: 'column',
                                     alignItems: 'center',
-                                    gap: 4,
-                                    padding: '10px 14px',
+                                    gap: 6,
+                                    padding: '10px 12px',
                                     background: 'rgba(255,255,255,0.03)',
                                     border: `1px solid ${m.accentColor}33`,
                                     borderRadius: 14,
+                                    minWidth: 72,
                                 }}
                             >
-                                <span style={{ fontSize: 24 }}>{m.icon}</span>
+                                <div
+                                    style={{
+                                        width: 56,
+                                        height: 56,
+                                        borderRadius: 10,
+                                        overflow: 'hidden',
+                                        background: 'rgba(255,255,255,0.04)',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        justifyContent: 'center',
+                                    }}
+                                >
+                                    {thumbs[m.id] ? (
+                                        <img
+                                            src={thumbs[m.id]}
+                                            alt={m.label}
+                                            style={{
+                                                width: '100%',
+                                                height: '100%',
+                                                objectFit: 'contain',
+                                            }}
+                                        />
+                                    ) : (
+                                        <div
+                                            style={{
+                                                fontSize: 26,
+                                                opacity: 0.5,
+                                            }}
+                                        >
+                                            📦
+                                        </div>
+                                    )}
+                                </div>
                                 <span
                                     style={{
                                         fontSize: 10,
@@ -1112,7 +1438,7 @@ export default function ARMeasure() {
                             style={{
                                 display: 'flex',
                                 flexDirection: 'column',
-                                gap: 10,
+                                gap: 8,
                                 maxWidth: 270,
                                 width: '100%',
                             }}
@@ -1121,8 +1447,8 @@ export default function ARMeasure() {
                                 [
                                     'Pick a model from the toolbar',
                                     'Tap 4 corners to trace the area',
-                                    'Model loads and fits automatically',
-                                    'Switch models to place more',
+                                    'Swap models freely, then Confirm',
+                                    'Tap Done to see your summary',
                                 ] as string[]
                             ).map((t, i) => (
                                 <div
@@ -1171,12 +1497,13 @@ function btn(
     bg: string,
     border: string,
     disabled: boolean,
+    glowColor?: string,
 ): React.CSSProperties {
     return {
         background: bg,
         border: `1px solid ${border}`,
         borderRadius: 12,
-        padding: '10px 20px',
+        padding: '10px 18px',
         fontSize: 11,
         fontWeight: 600,
         color: disabled ? '#333' : '#fff',
@@ -1185,5 +1512,6 @@ function btn(
         cursor: disabled ? 'default' : 'pointer',
         fontFamily: 'inherit',
         opacity: disabled ? 0.4 : 1,
+        boxShadow: glowColor && !disabled ? `0 0 18px ${glowColor}44` : 'none',
     };
 }
