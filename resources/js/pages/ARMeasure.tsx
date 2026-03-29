@@ -4,15 +4,16 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 
 declare global {
     interface Window {
-        THREE: typeof import('three');
-        // GLTFLoader is attached to THREE namespace after dynamic import
-        GLTFLoader: new () => {
-            load: (
-                url: string,
-                onLoad: (gltf: { scene: THREE.Group }) => void,
-                onProgress?: (e: ProgressEvent) => void,
-                onError?: (e: ErrorEvent) => void,
-            ) => void;
+        // The jsdelivr GLTFLoader UMD attaches to THREE.GLTFLoader, not window.GLTFLoader
+        THREE: typeof import('three') & {
+            GLTFLoader: new () => {
+                load: (
+                    url: string,
+                    onLoad: (gltf: { scene: THREE.Group }) => void,
+                    onProgress?: (e: ProgressEvent) => void,
+                    onError?: (err: unknown) => void,
+                ) => void;
+            };
         };
     }
 }
@@ -410,7 +411,7 @@ export default function ARMeasure() {
 
             setLoadingModel(true);
 
-            const loader = new window.GLTFLoader();
+            const loader = new window.THREE.GLTFLoader();
             loader.load(
                 modelDef.file,
                 (gltf) => {
@@ -532,6 +533,11 @@ export default function ARMeasure() {
         pending.corners.push({ position: pos.clone(), mesh: cornerMesh });
 
         if (pending.corners.length === 4) {
+            // Remove preview lines from scene before reset
+            if (pending.previewLines) {
+                scene.remove(pending.previewLines);
+                pending.previewLines = null;
+            }
             // Find selected model definition
             const modelDef =
                 MODELS.find((m) => m.id === selectedModelIdRef.current) ??
@@ -592,9 +598,15 @@ export default function ARMeasure() {
                     reticle.visible = true;
                     reticle.matrix.fromArray(hitPose.transform.matrix);
 
-                    // Extend live preview line to reticle position
+                    // Extend live preview line to reticle position — only while corners are pending
                     const pending = pendingRef.current;
-                    if (pending.corners.length >= 1) {
+                    if (pending.corners.length === 0) {
+                        // No pending corners — make sure no stale preview lines exist
+                        if (pending.previewLines) {
+                            scene.remove(pending.previewLines);
+                            pending.previewLines = null;
+                        }
+                    } else if (pending.corners.length >= 1) {
                         const THREE = window.THREE;
                         const rPos = new THREE.Vector3().setFromMatrixPosition(
                             new THREE.Matrix4().fromArray(
@@ -732,13 +744,17 @@ export default function ARMeasure() {
     // ── Derived UI values ────────────────────────────────────────────────────────
 
     const selectedModel = MODELS.find((m) => m.id === selectedModelId)!;
-    const hints = [
-        `Tap corner 1 of 4 — placing ${selectedModel.label}`,
-        'Tap corner 2 of 4',
-        'Tap corner 3 of 4',
-        `Tap final corner — ${selectedModel.icon} will appear!`,
-    ];
-    const hintMsg = hints[Math.min(pendingCount, 3)];
+
+    // pendingCount = number of corners already placed (0–3)
+    // Show which corner to tap NEXT
+    const hintMsg =
+        pendingCount === 0
+            ? `Select a model below, then tap corner 1`
+            : pendingCount === 1
+              ? `Tap corner 2 of 4`
+              : pendingCount === 2
+                ? `Tap corner 3 of 4`
+                : `Tap corner 4 of 4 — ${selectedModel.icon} will appear!`;
 
     // ── Render ───────────────────────────────────────────────────────────────────
 
