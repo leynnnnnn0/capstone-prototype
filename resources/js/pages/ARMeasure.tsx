@@ -867,24 +867,10 @@ export default function ARMeasure() {
                     </div>
                 )}
 
-                {/* Middle hint */}
-                {sessionActive && (
-                    <div style={{ display: 'flex', justifyContent: 'center' }}>
-                        <div
-                            style={glass({
-                                fontSize: 12,
-                                color: selectedModel.accentColor,
-                                letterSpacing: '0.05em',
-                                textAlign: 'center',
-                                maxWidth: 280,
-                            })}
-                        >
-                            {hintMsg}
-                        </div>
-                    </div>
-                )}
+                {/* Spacer — keeps top bar at top, bottom section at bottom */}
+                <div />
 
-                {/* Bottom: model toolbar + action buttons */}
+                {/* Bottom: hint + model toolbar + action buttons */}
                 {sessionActive && (
                     <div
                         style={{
@@ -898,6 +884,20 @@ export default function ARMeasure() {
                             uiTouchedRef.current = true;
                         }}
                     >
+                        {/* Hint — sits just above the toolbar, well clear of the reticle */}
+                        <div
+                            style={glass({
+                                fontSize: 12,
+                                color: selectedModel.accentColor,
+                                letterSpacing: '0.05em',
+                                textAlign: 'center',
+                                maxWidth: 280,
+                                pointerEvents: 'none',
+                            })}
+                        >
+                            {hintMsg}
+                        </div>
+
                         {/* Model picker */}
                         <div
                             style={{
