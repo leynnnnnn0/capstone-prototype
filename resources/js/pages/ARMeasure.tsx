@@ -5,7 +5,24 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 declare global {
     interface Window {
         THREE: typeof import('three');
+        // GLTFLoader is attached to THREE namespace after dynamic import
+        GLTFLoader: new () => {
+            load: (
+                url: string,
+                onLoad: (gltf: { scene: THREE.Group }) => void,
+                onProgress?: (e: ProgressEvent) => void,
+                onError?: (e: ErrorEvent) => void,
+            ) => void;
+        };
     }
+}
+
+interface ModelDef {
+    id: string;
+    label: string;
+    icon: string; // emoji stand-in; swap for <img> if you have thumbnails
+    file: string; // path under /public/models/
+    accentColor: string; // toolbar highlight colour
 }
 
 interface CornerPoint {
@@ -21,10 +38,11 @@ interface LabelData {
 
 interface QuadGroup {
     id: number;
+    modelId: string;
     corners: CornerPoint[];
-    faceMesh: THREE.Mesh;
     edgeLines: THREE.LineSegments;
     labelData: LabelData[];
+    modelRoot: THREE.Group | null; // null while loading
 }
 
 interface PendingState {
@@ -32,11 +50,45 @@ interface PendingState {
     previewLines: THREE.LineSegments | null;
 }
 
+// ─── Model catalogue ──────────────────────────────────────────────────────────
+// Edit paths / labels / icons here to match your actual files.
+
+const MODELS: ModelDef[] = [
+    {
+        id: 'window',
+        label: 'Window',
+        icon: '🪟',
+        file: '/models/window.glb',
+        accentColor: '#00e5ff',
+    },
+    {
+        id: 'window1',
+        label: 'Window 1',
+        icon: '🔲',
+        file: '/models/window1.glb',
+        accentColor: '#4fc3f7',
+    },
+    {
+        id: 'door1',
+        label: 'Door 1',
+        icon: '🚪',
+        file: '/models/door1.glb',
+        accentColor: '#ffd740',
+    },
+    {
+        id: 'door2',
+        label: 'Door 2',
+        icon: '🏠',
+        file: '/models/door2.glb',
+        accentColor: '#ff6e40',
+    },
+];
+
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const CORNER_COLOR = 0x00e5ff;
+const CORNER_COLOR = 0xffffff;
 const EDGE_COLOR = 0xffffff;
-const QUAD_COLOR = 0x00e5ff;
+const PREVIEW_COLOR = 0x00e5ff;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -83,15 +135,16 @@ function roundRect(
 function makeLabelSprite(
     THREE: typeof import('three'),
     text: string,
+    color = '#ffffff',
 ): LabelData {
     const canvas = document.createElement('canvas');
     canvas.width = 256;
     canvas.height = 64;
     const ctx = canvas.getContext('2d')!;
-    ctx.fillStyle = 'rgba(0,0,0,0.75)';
+    ctx.fillStyle = 'rgba(0,0,0,0.78)';
     roundRect(ctx, 0, 0, 256, 64, 12);
-    ctx.font = 'bold 28px monospace';
-    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 26px monospace';
+    ctx.fillStyle = color;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(text, 128, 32);
@@ -100,35 +153,6 @@ function makeLabelSprite(
     const sprite = new THREE.Sprite(mat);
     sprite.scale.set(0.28, 0.07, 1);
     return { canvas, texture, sprite };
-}
-
-function buildQuadGeo(
-    THREE: typeof import('three'),
-    pts: THREE.Vector3[],
-): THREE.BufferGeometry {
-    const geo = new THREE.BufferGeometry();
-    const v = new Float32Array([
-        pts[0].x,
-        pts[0].y,
-        pts[0].z,
-        pts[1].x,
-        pts[1].y,
-        pts[1].z,
-        pts[2].x,
-        pts[2].y,
-        pts[2].z,
-        pts[0].x,
-        pts[0].y,
-        pts[0].z,
-        pts[2].x,
-        pts[2].y,
-        pts[2].z,
-        pts[3].x,
-        pts[3].y,
-        pts[3].z,
-    ]);
-    geo.setAttribute('position', new THREE.BufferAttribute(v, 3));
-    return geo;
 }
 
 function buildEdgeGeo(
@@ -189,6 +213,65 @@ function buildPreviewGeo(
     return geo;
 }
 
+/**
+ * Position + scale a loaded GLTF group to fit the quad defined by 4 corners.
+ *
+ * Strategy:
+ *  - Bottom edge  = corners[0] → corners[1]  (width reference)
+ *  - Left edge    = corners[0] → corners[3]  (height reference)
+ *  - Origin placed at midpoint of the quad
+ *  - Model is rotated to align with the bottom edge direction
+ *  - Scaled so its bounding-box width matches the quad width
+ */
+function fitModelToQuad(
+    THREE: typeof import('three'),
+    group: THREE.Group,
+    pts: THREE.Vector3[],
+): void {
+    // Compute quad centre
+    const centre = new THREE.Vector3()
+        .add(pts[0])
+        .add(pts[1])
+        .add(pts[2])
+        .add(pts[3])
+        .multiplyScalar(0.25);
+
+    // Width = bottom edge length, height = left edge length
+    const quadWidth = pts[0].distanceTo(pts[1]);
+    const quadHeight = pts[0].distanceTo(pts[3]);
+
+    // Direction vectors for the quad plane
+    const edgeX = new THREE.Vector3().subVectors(pts[1], pts[0]).normalize(); // width direction
+    const edgeY = new THREE.Vector3().subVectors(pts[3], pts[0]).normalize(); // height direction
+    const normal = new THREE.Vector3().crossVectors(edgeX, edgeY).normalize();
+
+    // Build rotation matrix: X=edgeX, Y=edgeY, Z=normal
+    const rotMat = new THREE.Matrix4().makeBasis(edgeX, edgeY, normal);
+    group.setRotationFromMatrix(rotMat);
+
+    // Compute model bounding box in its local space (before world transform)
+    group.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(group);
+    const size = new THREE.Vector3();
+    box.getSize(size);
+
+    // Scale so model width matches quad width; height scales proportionally
+    // but is clamped to quad height so it never overflows.
+    const scaleByWidth = quadWidth / (size.x || 1);
+    const scaleByHeight = quadHeight / (size.y || 1);
+    const scale = Math.min(scaleByWidth, scaleByHeight);
+    group.scale.setScalar(scale);
+
+    // Recompute box after scale to centre properly
+    group.updateMatrixWorld(true);
+    const box2 = new THREE.Box3().setFromObject(group);
+    const centre2 = new THREE.Vector3();
+    box2.getCenter(centre2);
+
+    // Offset so model centre lands on quad centre
+    group.position.copy(centre).sub(centre2.sub(group.position));
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function ARMeasure() {
@@ -208,7 +291,7 @@ export default function ARMeasure() {
     const reticleRef = useRef<THREE.Mesh | null>(null);
     const threeLoadedRef = useRef(false);
 
-    // Quad state refs (mutable, no re-render in frame loop)
+    // Quad / pending state (mutable refs — no re-render in frame loop)
     const pendingRef = useRef<PendingState>({
         corners: [],
         previewLines: null,
@@ -216,45 +299,51 @@ export default function ARMeasure() {
     const quadsRef = useRef<QuadGroup[]>([]);
     const quadCounterRef = useRef(0);
 
+    // Currently selected model (read inside onSelect via ref so it's always fresh)
+    const selectedModelIdRef = useRef<string>(MODELS[0].id);
+
     // UI state
     const [arSupported, setArSupported] = useState<boolean | null>(null);
     const [sessionActive, setSessionActive] = useState(false);
-    const [statusMsg, setStatusMsg] = useState('Checking AR support…');
     const [pendingCount, setPendingCount] = useState(0);
     const [quadCount, setQuadCount] = useState(0);
+    const [selectedModelId, setSelectedModelId] = useState<string>(
+        MODELS[0].id,
+    );
+    const [loadingModel, setLoadingModel] = useState(false);
+
+    // Keep ref in sync with state
+    useEffect(() => {
+        selectedModelIdRef.current = selectedModelId;
+    }, [selectedModelId]);
 
     // ── AR support check ────────────────────────────────────────────────────────
 
     useEffect(() => {
         if (!navigator.xr) {
             setArSupported(false);
-            setStatusMsg('WebXR not available in this browser.');
             return;
         }
         navigator.xr
             .isSessionSupported('immersive-ar')
-            .then((ok) => {
-                setArSupported(ok);
-                setStatusMsg(
-                    ok
-                        ? 'AR ready — tap Start AR to begin.'
-                        : 'Immersive AR not supported on this device.',
-                );
-            })
-            .catch(() => {
-                setArSupported(false);
-                setStatusMsg('Could not query AR support.');
-            });
+            .then((ok) => setArSupported(ok))
+            .catch(() => setArSupported(false));
     }, []);
 
-    // ── Init Three.js ────────────────────────────────────────────────────────────
+    // ── Init Three.js + GLTFLoader ───────────────────────────────────────────────
 
     const initThree = useCallback(async (canvas: HTMLCanvasElement) => {
         if (threeLoadedRef.current) return;
+
+        // Load Three r128 then the GLTFLoader add-on
         await loadScript(
             'https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js',
         );
+        await loadScript(
+            'https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js',
+        );
         threeLoadedRef.current = true;
+
         const THREE = window.THREE;
 
         const renderer = new THREE.WebGLRenderer({
@@ -265,14 +354,21 @@ export default function ARMeasure() {
         renderer.setPixelRatio(window.devicePixelRatio);
         renderer.setSize(window.innerWidth, window.innerHeight);
         renderer.xr.enabled = true;
+        renderer.outputEncoding = (THREE as any).sRGBEncoding;
+        renderer.physicallyCorrectLights = true;
         rendererRef.current = renderer;
 
         const scene = new THREE.Scene();
         sceneRef.current = scene;
-        scene.add(new THREE.HemisphereLight(0xffffff, 0xbbbbff, 1));
-        const dir = new THREE.DirectionalLight(0xffffff, 0.8);
-        dir.position.set(0.5, 1, 1);
-        scene.add(dir);
+
+        // Rich lighting for GLB models
+        scene.add(new THREE.HemisphereLight(0xffffff, 0x8899aa, 1.2));
+        const sun = new THREE.DirectionalLight(0xffffff, 1.0);
+        sun.position.set(1, 2, 1.5);
+        scene.add(sun);
+        const fill = new THREE.DirectionalLight(0xffffff, 0.4);
+        fill.position.set(-1, 0.5, -1);
+        scene.add(fill);
 
         const camera = new THREE.PerspectiveCamera(
             70,
@@ -282,11 +378,11 @@ export default function ARMeasure() {
         );
         cameraRef.current = camera;
 
-        // Reticle ring
+        // Reticle
         const rGeo = new THREE.RingGeometry(0.04, 0.06, 32);
         rGeo.applyMatrix4(new THREE.Matrix4().makeRotationX(-Math.PI / 2));
         const rMat = new THREE.MeshBasicMaterial({
-            color: CORNER_COLOR,
+            color: 0x00e5ff,
             side: THREE.DoubleSide,
             transparent: true,
             opacity: 0.9,
@@ -304,15 +400,51 @@ export default function ARMeasure() {
         });
     }, []);
 
+    // ── Load a GLB and fit it to 4 corner points ────────────────────────────────
+
+    const loadAndPlaceModel = useCallback(
+        (modelDef: ModelDef, pts: THREE.Vector3[], quadId: number) => {
+            const scene = sceneRef.current;
+            if (!scene) return;
+            const THREE = window.THREE;
+
+            setLoadingModel(true);
+
+            const loader = new window.GLTFLoader();
+            loader.load(
+                modelDef.file,
+                (gltf) => {
+                    setLoadingModel(false);
+                    const group = gltf.scene;
+
+                    // Fit to quad
+                    fitModelToQuad(THREE, group, pts);
+                    scene.add(group);
+
+                    // Attach to the right quad entry
+                    const quad = quadsRef.current.find((q) => q.id === quadId);
+                    if (quad) quad.modelRoot = group;
+                },
+                undefined,
+                (err) => {
+                    setLoadingModel(false);
+                    console.error('GLTFLoader error:', err);
+                },
+            );
+        },
+        [],
+    );
+
     // ── Place a corner sphere ────────────────────────────────────────────────────
 
     const placeCornerMesh = useCallback((pos: THREE.Vector3): THREE.Mesh => {
         const THREE = window.THREE;
-        const geo = new THREE.SphereGeometry(0.018, 16, 16);
+        const geo = new THREE.SphereGeometry(0.016, 16, 16);
         const mat = new THREE.MeshStandardMaterial({
             color: CORNER_COLOR,
-            emissive: CORNER_COLOR,
-            emissiveIntensity: 0.5,
+            emissive: 0x00e5ff,
+            emissiveIntensity: 0.6,
+            roughness: 0.3,
         });
         const mesh = new THREE.Mesh(geo, mat);
         mesh.position.copy(pos);
@@ -320,57 +452,63 @@ export default function ARMeasure() {
         return mesh;
     }, []);
 
-    // ── Finalise quad from 4 corners ────────────────────────────────────────────
+    // ── Finalise quad: edge outline + labels + kick off GLB load ────────────────
 
-    const finaliseQuad = useCallback((corners: CornerPoint[]) => {
-        const THREE = window.THREE;
-        const scene = sceneRef.current!;
-        const pts = corners.map((c) => c.position);
+    const finaliseQuad = useCallback(
+        (corners: CornerPoint[], modelDef: ModelDef) => {
+            const THREE = window.THREE;
+            const scene = sceneRef.current!;
+            const pts = corners.map((c) => c.position);
 
-        // Filled translucent face
-        const faceMat = new THREE.MeshBasicMaterial({
-            color: QUAD_COLOR,
-            transparent: true,
-            opacity: 0.15,
-            side: THREE.DoubleSide,
-            depthWrite: false,
-        });
-        const faceMesh = new THREE.Mesh(buildQuadGeo(THREE, pts), faceMat);
-        scene.add(faceMesh);
+            // Edge outline
+            const edgeMat = new THREE.LineBasicMaterial({
+                color: EDGE_COLOR,
+                transparent: true,
+                opacity: 0.6,
+            });
+            const edgeLines = new THREE.LineSegments(
+                buildEdgeGeo(THREE, pts),
+                edgeMat,
+            );
+            scene.add(edgeLines);
 
-        // Edge outline
-        const edgeMat = new THREE.LineBasicMaterial({ color: EDGE_COLOR });
-        const edgeLines = new THREE.LineSegments(
-            buildEdgeGeo(THREE, pts),
-            edgeMat,
-        );
-        scene.add(edgeLines);
+            // Side-length labels (4 sides)
+            const labelData: LabelData[] = [];
+            for (let i = 0; i < 4; i++) {
+                const a = pts[i];
+                const b = pts[(i + 1) % 4];
+                const mid = new THREE.Vector3()
+                    .addVectors(a, b)
+                    .multiplyScalar(0.5);
+                mid.y += 0.05;
+                const dist = a.distanceTo(b);
+                const label = makeLabelSprite(
+                    THREE,
+                    fmtM(dist),
+                    modelDef.accentColor,
+                );
+                label.sprite.position.copy(mid);
+                scene.add(label.sprite);
+                labelData.push(label);
+            }
 
-        // Side-length labels (4 sides: 0→1, 1→2, 2→3, 3→0)
-        const labelData: LabelData[] = [];
-        for (let i = 0; i < 4; i++) {
-            const a = pts[i];
-            const b = pts[(i + 1) % 4];
-            const dist = a.distanceTo(b);
-            const mid = new THREE.Vector3()
-                .addVectors(a, b)
-                .multiplyScalar(0.5);
-            mid.y += 0.045;
-            const label = makeLabelSprite(THREE, fmtM(dist));
-            label.sprite.position.copy(mid);
-            scene.add(label.sprite);
-            labelData.push(label);
-        }
+            const quadId = ++quadCounterRef.current;
+            const quad: QuadGroup = {
+                id: quadId,
+                modelId: modelDef.id,
+                corners,
+                edgeLines,
+                labelData,
+                modelRoot: null,
+            };
+            quadsRef.current.push(quad);
+            setQuadCount(quadsRef.current.length);
 
-        quadsRef.current.push({
-            id: ++quadCounterRef.current,
-            corners,
-            faceMesh,
-            edgeLines,
-            labelData,
-        });
-        setQuadCount(quadsRef.current.length);
-    }, []);
+            // Load + place the GLB model
+            loadAndPlaceModel(modelDef, pts, quadId);
+        },
+        [loadAndPlaceModel],
+    );
 
     // ── onSelect: tap → place corner ────────────────────────────────────────────
 
@@ -384,7 +522,7 @@ export default function ARMeasure() {
         const pos = new THREE.Vector3().setFromMatrixPosition(mat4);
         const pending = pendingRef.current;
 
-        // Remove old preview
+        // Remove old preview lines before rebuilding
         if (pending.previewLines) {
             scene.remove(pending.previewLines);
             pending.previewLines = null;
@@ -394,17 +532,20 @@ export default function ARMeasure() {
         pending.corners.push({ position: pos.clone(), mesh: cornerMesh });
 
         if (pending.corners.length === 4) {
-            // Close the quad
-            finaliseQuad([...pending.corners]);
+            // Find selected model definition
+            const modelDef =
+                MODELS.find((m) => m.id === selectedModelIdRef.current) ??
+                MODELS[0];
+            finaliseQuad([...pending.corners], modelDef);
             pendingRef.current = { corners: [], previewLines: null };
             setPendingCount(0);
         } else {
-            // Draw dashed preview lines through placed corners
+            // Draw dashed preview through placed corners
             if (pending.corners.length >= 2) {
                 const ppts = pending.corners.map((c) => c.position);
                 const pGeo = buildPreviewGeo(THREE, ppts);
                 const pMat = new THREE.LineDashedMaterial({
-                    color: CORNER_COLOR,
+                    color: PREVIEW_COLOR,
                     dashSize: 0.03,
                     gapSize: 0.02,
                 });
@@ -451,7 +592,7 @@ export default function ARMeasure() {
                     reticle.visible = true;
                     reticle.matrix.fromArray(hitPose.transform.matrix);
 
-                    // Live preview: extend dashed line to current reticle position
+                    // Extend live preview line to reticle position
                     const pending = pendingRef.current;
                     if (pending.corners.length >= 1) {
                         const THREE = window.THREE;
@@ -464,20 +605,17 @@ export default function ARMeasure() {
                             ...pending.corners.map((c) => c.position),
                             rPos,
                         ];
-
                         if (pending.previewLines) {
                             pending.previewLines.geometry.dispose();
                             pending.previewLines.geometry = buildPreviewGeo(
                                 THREE,
                                 ppts,
                             );
-                            (
-                                pending.previewLines as THREE.LineSegments
-                            ).computeLineDistances();
+                            pending.previewLines.computeLineDistances();
                         } else {
                             const pGeo = buildPreviewGeo(THREE, ppts);
                             const pMat = new THREE.LineDashedMaterial({
-                                color: CORNER_COLOR,
+                                color: PREVIEW_COLOR,
                                 dashSize: 0.03,
                                 gapSize: 0.02,
                             });
@@ -518,9 +656,7 @@ export default function ARMeasure() {
             xrHitTestSourceRef.current = null;
             xrSessionRef.current = null;
             setSessionActive(false);
-            setStatusMsg('Session ended — tap Start AR to restart.');
         });
-
         session.addEventListener('select', onSelect);
 
         const viewerSpace = await session.requestReferenceSpace('viewer');
@@ -536,7 +672,6 @@ export default function ARMeasure() {
             onXRFrameRef.current,
         );
         setSessionActive(true);
-        setStatusMsg('Tap a surface to place corner 1 of 4.');
     }, [initThree, onSelect]);
 
     // ── End AR ───────────────────────────────────────────────────────────────────
@@ -551,10 +686,10 @@ export default function ARMeasure() {
         const scene = sceneRef.current;
         if (!scene) return;
         quadsRef.current.forEach((q) => {
-            scene.remove(q.faceMesh);
             scene.remove(q.edgeLines);
             q.corners.forEach((c) => scene.remove(c.mesh));
             q.labelData.forEach((l) => scene.remove(l.sprite));
+            if (q.modelRoot) scene.remove(q.modelRoot);
         });
         quadsRef.current = [];
         setQuadCount(0);
@@ -577,13 +712,12 @@ export default function ARMeasure() {
             scene.remove(pending.previewLines);
             pending.previewLines = null;
         }
-        // Rebuild preview for remaining corners
         if (pending.corners.length >= 2) {
             const THREE = window.THREE;
             const ppts = pending.corners.map((c) => c.position);
             const pGeo = buildPreviewGeo(THREE, ppts);
             const pMat = new THREE.LineDashedMaterial({
-                color: CORNER_COLOR,
+                color: PREVIEW_COLOR,
                 dashSize: 0.03,
                 gapSize: 0.02,
             });
@@ -595,15 +729,16 @@ export default function ARMeasure() {
         setPendingCount(pending.corners.length);
     }, []);
 
-    // ── Hint ────────────────────────────────────────────────────────────────────
+    // ── Derived UI values ────────────────────────────────────────────────────────
 
+    const selectedModel = MODELS.find((m) => m.id === selectedModelId)!;
     const hints = [
-        'Tap to place corner 1 of 4',
-        'Tap to place corner 2 of 4',
-        'Tap to place corner 3 of 4',
-        'Tap final corner — quad closes!',
+        `Tap corner 1 of 4 — placing ${selectedModel.label}`,
+        'Tap corner 2 of 4',
+        'Tap corner 3 of 4',
+        `Tap final corner — ${selectedModel.icon} will appear!`,
     ];
-    const hintMsg = hints[pendingCount] ?? hints[0];
+    const hintMsg = hints[Math.min(pendingCount, 3)];
 
     // ── Render ───────────────────────────────────────────────────────────────────
 
@@ -612,7 +747,7 @@ export default function ARMeasure() {
             style={{
                 position: 'fixed',
                 inset: 0,
-                background: '#090910',
+                background: '#08080f',
                 fontFamily: "'DM Mono','Fira Code',monospace",
                 color: '#e0e0e0',
                 overflow: 'hidden',
@@ -641,10 +776,10 @@ export default function ARMeasure() {
                     flexDirection: 'column',
                     justifyContent: 'space-between',
                     padding:
-                        'env(safe-area-inset-top,16px) 16px env(safe-area-inset-bottom,24px)',
+                        'env(safe-area-inset-top,16px) 16px env(safe-area-inset-bottom,12px)',
                 }}
             >
-                {/* Top bar */}
+                {/* ── Top bar ── */}
                 {sessionActive && (
                     <div
                         style={{
@@ -672,18 +807,25 @@ export default function ARMeasure() {
                                 alignItems: 'center',
                             })}
                         >
+                            {loadingModel && (
+                                <span
+                                    style={{ color: '#ffd740', fontSize: 11 }}
+                                >
+                                    ⏳ Loading…
+                                </span>
+                            )}
                             <span>
-                                <span style={{ color: '#666' }}>Quads </span>
+                                <span style={{ color: '#555' }}>Placed </span>
                                 <b style={{ color: '#fff' }}>{quadCount}</b>
                             </span>
-                            <span style={{ color: '#333' }}>│</span>
+                            <span style={{ color: '#222' }}>│</span>
                             <span>
-                                <span style={{ color: '#666' }}>Pts </span>
+                                <span style={{ color: '#555' }}>Pts </span>
                                 <b
                                     style={{
                                         color:
                                             pendingCount > 0
-                                                ? '#ffd740'
+                                                ? selectedModel.accentColor
                                                 : '#fff',
                                     }}
                                 >
@@ -694,14 +836,22 @@ export default function ARMeasure() {
                     </div>
                 )}
 
-                {/* Middle hint */}
+                {/* ── Middle hint ── */}
                 {sessionActive && (
-                    <div style={{ display: 'flex', justifyContent: 'center' }}>
+                    <div
+                        style={{
+                            display: 'flex',
+                            justifyContent: 'center',
+                            pointerEvents: 'none',
+                        }}
+                    >
                         <div
                             style={glass({
                                 fontSize: 12,
-                                color: '#ffd740',
+                                color: selectedModel.accentColor,
                                 letterSpacing: '0.05em',
+                                textAlign: 'center',
+                                maxWidth: 280,
                             })}
                         >
                             {hintMsg}
@@ -709,48 +859,110 @@ export default function ARMeasure() {
                     </div>
                 )}
 
-                {/* Bottom buttons */}
+                {/* ── Bottom: model toolbar + controls ── */}
                 {sessionActive && (
                     <div
                         style={{
                             pointerEvents: 'all',
                             display: 'flex',
+                            flexDirection: 'column',
                             gap: 10,
-                            justifyContent: 'center',
+                            alignItems: 'center',
                         }}
                     >
-                        <button
-                            onClick={undoCorner}
-                            disabled={pendingCount === 0}
-                            style={btn(
-                                '#1a1a2e',
-                                'rgba(255,221,64,0.35)',
-                                pendingCount === 0,
-                            )}
+                        {/* Model picker toolbar */}
+                        <div
+                            style={{
+                                display: 'flex',
+                                gap: 8,
+                                padding: '8px 10px',
+                                background: 'rgba(0,0,0,0.7)',
+                                backdropFilter: 'blur(16px)',
+                                border: '1px solid rgba(255,255,255,0.07)',
+                                borderRadius: 18,
+                            }}
                         >
-                            Undo
-                        </button>
-                        <button
-                            onClick={clearAll}
-                            style={btn(
-                                '#1a1a2e',
-                                'rgba(255,255,255,0.12)',
-                                false,
-                            )}
-                        >
-                            Clear
-                        </button>
-                        <button
-                            onClick={endAR}
-                            style={btn('#2e1a1a', '#ff5252', false)}
-                        >
-                            Exit AR
-                        </button>
+                            {MODELS.map((m) => {
+                                const active = m.id === selectedModelId;
+                                return (
+                                    <button
+                                        key={m.id}
+                                        onClick={() => setSelectedModelId(m.id)}
+                                        style={{
+                                            display: 'flex',
+                                            flexDirection: 'column',
+                                            alignItems: 'center',
+                                            gap: 3,
+                                            padding: '8px 12px',
+                                            background: active
+                                                ? m.accentColor + '22'
+                                                : 'transparent',
+                                            border: active
+                                                ? `1.5px solid ${m.accentColor}`
+                                                : '1.5px solid transparent',
+                                            borderRadius: 12,
+                                            cursor: 'pointer',
+                                            transition: 'all 0.15s',
+                                            minWidth: 56,
+                                        }}
+                                    >
+                                        <span style={{ fontSize: 22 }}>
+                                            {m.icon}
+                                        </span>
+                                        <span
+                                            style={{
+                                                fontSize: 9,
+                                                letterSpacing: '0.04em',
+                                                color: active
+                                                    ? m.accentColor
+                                                    : '#555',
+                                                fontFamily: 'inherit',
+                                                textTransform: 'uppercase',
+                                                fontWeight: active ? 700 : 400,
+                                            }}
+                                        >
+                                            {m.label}
+                                        </span>
+                                    </button>
+                                );
+                            })}
+                        </div>
+
+                        {/* Action buttons */}
+                        <div style={{ display: 'flex', gap: 8 }}>
+                            <button
+                                onClick={undoCorner}
+                                disabled={pendingCount === 0}
+                                style={btn(
+                                    '#111',
+                                    'rgba(255,221,64,0.3)',
+                                    pendingCount === 0,
+                                )}
+                            >
+                                Undo
+                            </button>
+                            <button
+                                onClick={clearAll}
+                                style={btn(
+                                    '#111',
+                                    'rgba(255,255,255,0.1)',
+                                    false,
+                                )}
+                            >
+                                Clear
+                            </button>
+                            <button
+                                onClick={endAR}
+                                style={btn('#1a0808', '#ff5252', false)}
+                            >
+                                Exit AR
+                            </button>
+                        </div>
                     </div>
                 )}
             </div>
 
-            {/* Landing */}
+            {/* ── Landing screen ── */}
             {!sessionActive && (
                 <div
                     style={{
@@ -764,6 +976,7 @@ export default function ARMeasure() {
                         padding: 24,
                     }}
                 >
+                    {/* Title */}
                     <div style={{ textAlign: 'center' }}>
                         <h1
                             style={{
@@ -777,7 +990,7 @@ export default function ARMeasure() {
                                 WebkitTextFillColor: 'transparent',
                             }}
                         >
-                            AR Quad Measure
+                            AR Model Placer
                         </h1>
                         <p
                             style={{
@@ -788,23 +1001,60 @@ export default function ARMeasure() {
                                 textTransform: 'uppercase',
                             }}
                         >
-                            4-point surface tracing
+                            Place windows &amp; doors with 4-point tracing
                         </p>
                     </div>
 
+                    {/* Model preview strip */}
+                    <div style={{ display: 'flex', gap: 10 }}>
+                        {MODELS.map((m) => (
+                            <div
+                                key={m.id}
+                                style={{
+                                    display: 'flex',
+                                    flexDirection: 'column',
+                                    alignItems: 'center',
+                                    gap: 4,
+                                    padding: '10px 14px',
+                                    background: 'rgba(255,255,255,0.03)',
+                                    border: `1px solid ${m.accentColor}33`,
+                                    borderRadius: 14,
+                                }}
+                            >
+                                <span style={{ fontSize: 24 }}>{m.icon}</span>
+                                <span
+                                    style={{
+                                        fontSize: 10,
+                                        color: m.accentColor,
+                                        textTransform: 'uppercase',
+                                        letterSpacing: '0.06em',
+                                    }}
+                                >
+                                    {m.label}
+                                </span>
+                            </div>
+                        ))}
+                    </div>
+
+                    {/* Status */}
                     <div
                         style={glass({
                             maxWidth: 300,
                             width: '100%',
                             textAlign: 'center',
                             fontSize: 13,
-                            color: arSupported === false ? '#ff5252' : '#666',
+                            color: arSupported === false ? '#ff5252' : '#555',
                             lineHeight: 1.7,
                         })}
                     >
-                        {statusMsg}
+                        {arSupported === null && 'Checking AR support…'}
+                        {arSupported === true &&
+                            'AR ready — tap Start AR to begin.'}
+                        {arSupported === false &&
+                            'Immersive AR not supported on this device.'}
                     </div>
 
+                    {/* CTA */}
                     {arSupported && (
                         <button
                             onClick={startAR}
@@ -820,31 +1070,32 @@ export default function ARMeasure() {
                                 letterSpacing: '0.08em',
                                 textTransform: 'uppercase',
                                 cursor: 'pointer',
-                                boxShadow: '0 0 36px rgba(0,229,255,0.28)',
+                                boxShadow: '0 0 36px rgba(0,229,255,0.25)',
                             }}
                         >
                             Start AR
                         </button>
                     )}
 
+                    {/* Instructions */}
                     {arSupported && (
                         <div
                             style={{
                                 display: 'flex',
                                 flexDirection: 'column',
                                 gap: 10,
-                                maxWidth: 260,
+                                maxWidth: 270,
                                 width: '100%',
                             }}
                         >
                             {(
                                 [
-                                    'Point at a flat surface',
-                                    'Tap 4 corners to trace a quad',
-                                    'Side lengths appear automatically',
-                                    'Keep tapping to add more quads',
-                                ] as string[]
-                            ).map((t, i) => (
+                                    ['01', 'Pick a model from the toolbar'],
+                                    ['02', 'Tap 4 corners on a wall or floor'],
+                                    ['03', 'The model fits automatically'],
+                                    ['04', 'Switch models and add more'],
+                                ] as [string, string][]
+                            ).map(([n, t]) => (
                                 <div
                                     key={t}
                                     style={{
@@ -861,7 +1112,7 @@ export default function ARMeasure() {
                                             flexShrink: 0,
                                         }}
                                     >
-                                        0{i + 1}
+                                        {n}
                                     </span>
                                     <span>{t}</span>
                                 </div>
@@ -878,8 +1129,8 @@ export default function ARMeasure() {
 
 function glass(extra: React.CSSProperties = {}): React.CSSProperties {
     return {
-        background: 'rgba(0,0,0,0.6)',
-        backdropFilter: 'blur(14px)',
+        background: 'rgba(0,0,0,0.62)',
+        backdropFilter: 'blur(16px)',
         border: '1px solid rgba(255,255,255,0.07)',
         borderRadius: 12,
         padding: '10px 16px',
@@ -896,14 +1147,14 @@ function btn(
         background: bg,
         border: `1px solid ${border}`,
         borderRadius: 12,
-        padding: '11px 22px',
-        fontSize: 12,
+        padding: '10px 20px',
+        fontSize: 11,
         fontWeight: 600,
-        color: disabled ? '#444' : '#fff',
-        letterSpacing: '0.06em',
+        color: disabled ? '#333' : '#fff',
+        letterSpacing: '0.07em',
         textTransform: 'uppercase',
         cursor: disabled ? 'default' : 'pointer',
         fontFamily: 'inherit',
-        opacity: disabled ? 0.45 : 1,
+        opacity: disabled ? 0.4 : 1,
     };
 }
