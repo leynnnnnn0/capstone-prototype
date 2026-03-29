@@ -231,18 +231,18 @@ function fitModelToQuad(
     const size = new THREE.Vector3();
     new THREE.Box3().setFromObject(group).getSize(size);
 
-    // Scale to fit quad width, clamped by height
-    const scale = Math.min(
-        quadWidth / (size.x || 1),
-        quadHeight / (size.y || 1),
-    );
-    group.scale.setScalar(scale);
+    // Non-uniform stretch: X fills quad width, Y fills quad height, Z averaged
+    const scaleX = quadWidth / (size.x || 1);
+    const scaleY = quadHeight / (size.y || 1);
+    const scaleZ = (scaleX + scaleY) / 2;
+    group.scale.set(scaleX, scaleY, scaleZ);
 
-    // Second pass: centre on quad
+    // Re-centre on quad after scale
     group.updateMatrixWorld(true);
     const boxCentre = new THREE.Vector3();
     new THREE.Box3().setFromObject(group).getCenter(boxCentre);
-    group.position.add(centre).sub(boxCentre);
+    // boxCentre is world position of model centre; shift group.position so it lands on quad centre
+    group.position.copy(centre.clone().sub(boxCentre).add(group.position));
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -272,6 +272,11 @@ export default function ARMeasure() {
     // Completed quads
     const quadsRef = useRef<QuadGroup[]>([]);
     const quadCounterRef = useRef(0);
+
+    // ── UI touch guard — prevents toolbar taps from firing onSelect ─────────────
+    // WebXR's "select" event fires for ALL screen taps. We track whether the touch
+    // landed on a UI element and skip onSelect if so.
+    const uiTouchedRef = useRef(false);
 
     // Selected model — ref keeps it fresh inside the XR frame callback
     const selectedModelIdRef = useRef<string>(MODELS[0].id);
@@ -524,6 +529,12 @@ export default function ARMeasure() {
     // ── onSelect: called on every tap ───────────────────────────────────────────
 
     const onSelect = useCallback(() => {
+        // If the touch originated on a UI button, ignore it
+        if (uiTouchedRef.current) {
+            uiTouchedRef.current = false;
+            return;
+        }
+
         const reticle = reticleRef.current;
         const scene = sceneRef.current;
         if (!reticle?.visible || !scene) return;
@@ -806,6 +817,9 @@ export default function ARMeasure() {
                             alignItems: 'flex-start',
                             gap: 10,
                         }}
+                        onPointerDown={() => {
+                            uiTouchedRef.current = true;
+                        }}
                     >
                         <div
                             style={glass({
@@ -879,6 +893,9 @@ export default function ARMeasure() {
                             flexDirection: 'column',
                             gap: 10,
                             alignItems: 'center',
+                        }}
+                        onPointerDown={() => {
+                            uiTouchedRef.current = true;
                         }}
                     >
                         {/* Model picker */}
